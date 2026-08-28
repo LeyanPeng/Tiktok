@@ -1639,11 +1639,11 @@
     }
   ],
   "run_meta": {
-    "label": "rollback-verify",
+    "label": "offline",
     "paraphrase": false,
-    "index_build_seconds": 0.7,
-    "eval_seconds": 10.62,
-    "seconds_per_session": 0.0531,
+    "index_build_seconds": 0.52,
+    "eval_seconds": 8.22,
+    "seconds_per_session": 0.0411,
     "network_required": false
   }
 }

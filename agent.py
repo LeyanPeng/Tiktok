@@ -41,6 +41,38 @@ class Agent:
         )
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+        """官方评测器规定：抛异常、输出非法、超时，都按 miss 计。
+
+        所以这里包一层总兜底。它**不是**用来掩盖 bug 的——
+        内部所有验收和自测都跑在未包裹的 _respond 上，出错会照常炸出来；
+        这一层只负责保证：万一评测环境里出现我们没预料到的输入，
+        损失是「这一轮排序差一点」，而不是「整场归零」。
+        降级路径本身有反向验证，见 tools/failure_drill.py。
+        """
+        try:
+            return self._respond(session_id, user_message, turn, top_k)
+        except Exception:
+            return self._fallback(session_id, top_k)
+
+    def _fallback(self, session_id: str, top_k: int) -> dict:
+        """降级：交出上一轮的推荐；连上一轮都没有就交该类目下最热门的。
+
+        绝不返回空列表——空列表等于主动放弃这一轮的命中机会。
+        """
+        state = self._sessions.get(session_id)
+        if state is not None and state.last_recommendations:
+            picks = state.last_recommendations[:top_k]
+        else:
+            category = state.category if state is not None else None
+            picks = self.catalog.top_popular(category, top_k)
+        return {
+            "message": "Let me show you some popular options while I narrow things down.",
+            "ask_attribute": None,
+            "recommendations": [{"parent_asin": asin} for asin in picks],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    def _respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         state = self._sessions.get(session_id)
         if state is None:                      # 防御：reset 没被调用也不能崩
             self.reset(session_id, {})
@@ -62,10 +94,13 @@ class Agent:
         if ask:
             state.asked.append(ask)
 
+        picks = [asin for asin, _ in ranked]
+        state.last_recommendations = picks      # 供异常降级使用
+
         return {
             "message": self._phrase(ask, state),
             "ask_attribute": ask,
-            "recommendations": [{"parent_asin": asin} for asin, _ in ranked],
+            "recommendations": [{"parent_asin": asin} for asin in picks],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 

@@ -90,6 +90,7 @@ class Catalog:
         self.prior: dict[str, float] = {}   # 人气先验，只用于同分打破平局
         self.fields: dict[str, tuple[str, ...]] = {}  # 按 TEXT_FIELDS 顺序分字段存放
         self._bucket_blob: dict[str, str] = {}  # 桶级文本缓存，见 bucket_blob()
+        self._popular: dict[str, list[str]] = {}  # 类目热门榜缓存，见 top_popular()
         self._load()
 
     def _load(self) -> None:
@@ -152,6 +153,22 @@ class Catalog:
             cached = SEPARATOR.join(self.blob[a] for a in self.candidates(category))
             self._bucket_blob[key] = cached
         return cached
+
+    def top_popular(self, category: str | None, k: int = 10) -> list[str]:
+        """该类目下最热门的 k 件，结果缓存。
+
+        专供异常降级路径使用，所以必须快：原来每次现排一遍候选池，
+        类目还没识别出来时那就是对 50,000 件做全排序——
+        兜底本该是最快的路径，不该是最慢的。
+        """
+        key = category or "__ALL__"
+        cached = self._popular.get(key)
+        if cached is None:
+            cached = sorted(
+                self.candidates(category), key=lambda a: -self.prior.get(a, 0.0)
+            )[:64]
+            self._popular[key] = cached
+        return cached[:k]
 
     def field_weight(self, asin: str, needle: str) -> float:
         """这条约束命中在该商品的哪个字段上，返回该字段的权重（取最高的那个）。

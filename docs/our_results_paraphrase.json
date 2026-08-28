@@ -1639,11 +1639,11 @@
     }
   ],
   "run_meta": {
-    "label": "T6T7-paraphrase",
+    "label": "paraphrase",
     "paraphrase": true,
-    "index_build_seconds": 0.72,
-    "eval_seconds": 7.3,
-    "seconds_per_session": 0.0365,
+    "index_build_seconds": 0.53,
+    "eval_seconds": 10.16,
+    "seconds_per_session": 0.0508,
     "network_required": false
   }
 }

@@ -47,6 +47,7 @@ class SessionState:
     intent: str = "browsing"    # browsing | buying
     last_pool_size: int | None = None
     stale_rounds: int = 0       # 候选池连续多少轮没缩小
+    last_recommendations: list = field(default_factory=list)  # 降级时交出上一轮结果
 
     # ── 观察 ────────────────────────────────────────────────────────
     def observe(
