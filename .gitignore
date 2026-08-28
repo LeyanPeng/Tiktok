@@ -1,0 +1,15 @@
+# 主办方数据，禁止入库（见 DATA_ATTRIBUTION.md），且 catalog 有 58MB
+data/catalog.jsonl
+data/catalog.jsonl.gz
+*.gz
+# 评测产物
+results*.json
+runs/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# 密钥，永不入库
+.env
+*.key
