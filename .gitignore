@@ -1,15 +1,33 @@
-# 主办方数据，禁止入库（见 DATA_ATTRIBUTION.md），且 catalog 有 58MB
-data/catalog.jsonl
-data/catalog.jsonl.gz
-*.gz
-# 评测产物
+# Organiser-supplied material. Not redistributed here — see README for how to
+# obtain it from the official participant kit.
+data/
+evaluator/
+starter/
+docs/competition_specification.md
+docs/submission_rules.md
+docs/agent_api_contract.json
+docs/evaluation_config.json
+docs/baseline_results.json
+
+# Working notes and internal process records. Kept locally, not part of the
+# submission.
+PROGRESS.md
+BLOCKED.md
+docs/DEVPOST.md
+docs/DEMO_SCRIPT.md
+review-archive/
+
+# Evaluation output
 results*.json
 runs/
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-# 密钥，永不入库
+
+# Secrets: never committed
 .env
 *.key
+*.pem

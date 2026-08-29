@@ -1,11 +1,12 @@
-"""T2 验收 · 约束抽取审计
+"""Constraint extraction audit: how much of what the customer says do we hear?
 
-问题：我们的抽取层，到底听懂了顾客说的百分之多少？
+Method: drive real dialogues through the official simulator turn by turn, while
+recording the constraint spans **actually placed into** each message. The same
+message is then fed to src/extract.py and the two are compared. This is a
+controlled comparison against ground truth, not a self-assessment.
 
-做法：用官方模拟器逐轮生成真实对话，同时记录每句话里**实际塞进去**的约束原句，
-然后把同一句话喂给 src/extract.py，比对两边。这是一次严格的对照，不是自评。
-
-验收线 (T2)：>= 95% 的 session，抽出条数 == 实际吐露条数
+Acceptance: in at least 95% of sessions, the number of spans extracted equals the
+number actually stated.
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# 模拟器一侧：直接用官方实现，保证对照基准没有走样
+# The simulator side uses the official implementation directly, so the reference
+# it is measured against cannot itself have drifted.
 from evaluator.local_evaluator import (
     ALLOWED_ATTRIBUTES,
     MAX_TURNS,
@@ -29,12 +31,13 @@ from evaluator.local_evaluator import (
 from src.catalog import Catalog
 from src.session_state import SessionState
 
-# 固定追问顺序：按 T1 实测的信息量排序（feature 50.5% > material 37.8% > color 7.5%）
+# Fixed ask order for the audit, by measured information yield
+# (feature 50.5% > material 37.8% > color 7.5%).
 ASK_SEQUENCE = ["feature", "material", "color", "style", "size", "use_case", "budget", "brand"]
 
 
 def spoken_initial(sample: dict, category: str, disclosed: set[str]) -> tuple[str, list[str]]:
-    """复刻 evaluator.initial_message，额外返回这句话里真实吐露的约束。"""
+    """Mirror evaluator.initial_message, also returning the spans it actually stated."""
     scenario = sample["scenario_type"]
     card = sample["intent_card"]
     if scenario == "buying" and card.get("hard_constraints"):
@@ -43,7 +46,8 @@ def spoken_initial(sample: dict, category: str, disclosed: set[str]) -> tuple[st
         return f"I'm looking for {category}. A key requirement is: {value}.", [value]
     if scenario == "intent_override":
         old = str(sample["behavior"]["override"]["old_value"])
-        # 注意：官方没有把 old_value 记进 disclosed，但顾客确实说出口了
+        # Note: the official code does not add old_value to `disclosed`, but the
+        # customer did say it out loud.
         return f"I'm looking for {category}. {old}", [old]
     return f"I'm looking for {category}, but I'm still exploring.", []
 
@@ -51,7 +55,7 @@ def spoken_initial(sample: dict, category: str, disclosed: set[str]) -> tuple[st
 def spoken_reply(
     sample: dict, ask_attribute: str | None, disclosed: set[str], boundary_used: bool
 ) -> tuple[str, list[str], bool]:
-    """复刻 evaluator.customer_reply，额外返回这句话里真实吐露的约束。"""
+    """Mirror evaluator.customer_reply, also returning the spans it actually stated."""
     attribute = ask_attribute if isinstance(ask_attribute, str) else None
     if sample["scenario_type"] == "boundary" and not boundary_used and attribute:
         return f"I don't have a preference for {attribute}; please use your judgment.", [], True
@@ -139,11 +143,11 @@ def audit_session(sample: dict, products: dict, catalog: Catalog) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="T2 约束抽取审计")
+    parser = argparse.ArgumentParser(description="Constraint extraction audit")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--output", default="docs/extract_audit.json")
-    parser.add_argument("--show", type=int, default=3, help="打印几条失败样本")
+    parser.add_argument("--show", type=int, default=3, help="how many failing sessions to print")
     args = parser.parse_args()
 
     catalog = Catalog(args.catalog)
@@ -189,30 +193,33 @@ def main() -> int:
     )
 
     passed = count_match >= 0.95
-    print("T2 验收")
-    print(f"  [{'PASS' if passed else 'FAIL'}] 抽出条数 == 吐露条数 的场次比例 >= 95%"
-          f"   实际={count_match:.1%}")
+    print("Extraction audit")
+    print(f"  [{'PASS' if passed else 'FAIL'}] sessions where extracted count == stated count >= 95%"
+          f"   actual={count_match:.1%}")
     print()
-    print(f"内容完全一致    {exact_match:.1%}")
-    print(f"平均召回        {recall:.1%}")
-    print(f"类目识别正确    {category_hit:.1%}")
-    print(f"改主意识别      {override_hit:.1%}")
-    print("\n分场景")
+    print(f"exact content match   {exact_match:.1%}")
+    print(f"mean recall           {recall:.1%}")
+    print(f"category identified   {category_hit:.1%}")
+    print(f"override detected     {override_hit:.1%}")
+    print()
+    print("By scenario")
     for scenario, info in summary["by_scenario"].items():
-        print(f"  {scenario:<16} n={info['n']:<4} 条数一致={info['count_match']:>6.1%}  召回={info['recall']:>6.1%}")
+        print(f"  {scenario:<16} n={info['n']:<4} count match={info['count_match']:>6.1%}  recall={info['recall']:>6.1%}")
 
     failures = [r for r in results if not r["count_match"]]
     if failures and args.show:
-        print(f"\n失败样本 {len(failures)} 例，前 {min(args.show, len(failures))} 例：")
+        print()
+        print(f"{len(failures)} failing sessions, showing {min(args.show, len(failures))}:")
         for r in failures[:args.show]:
             print(f"  -- {r['sample_id']} [{r['scenario_type']}] "
-                  f"吐露 {r['spoken_count']} / 抽出 {r['extracted_count']}")
+                  f"stated {r['spoken_count']} / extracted {r['extracted_count']}")
             for text in r["missed"][:2]:
-                print(f"     漏抽: {text[:88]!r}")
+                print(f"     missed:   {text[:88]!r}")
             for text in r["spurious"][:2]:
-                print(f"     多抽: {text[:88]!r}")
+                print(f"     spurious: {text[:88]!r}")
 
-    print(f"\n完整报告 -> {args.output}")
+    print()
+    print(f"full report -> {args.output}")
     return 0 if passed else 1
 
 

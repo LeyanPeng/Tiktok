@@ -1,8 +1,10 @@
-"""反向验证：我们在 src/ 里独立实现的 coarse_category，与官方逐字一致吗？
+"""Reverse verification: does our independent `coarse_category` match the official one?
 
-src/ 不允许 import evaluator/（提交时那份代码不存在），所以规则复刻了一份。
-复刻就有走样的风险，而这种走样「坏了没人会知道」——必须有专门的检查。
-在全部 50,000 件商品上比对，一条不一致就算失败。
+`src/` may not import from `evaluator/` — the organiser's harness will not contain
+our copy — so the category rule is reimplemented there. A reimplementation can
+drift, and this particular drift is the kind nobody would notice: the agent would
+just quietly prune the wrong bucket. So it gets a dedicated check, run against all
+50,000 products. One mismatch fails.
 """
 from __future__ import annotations
 import json, sys
@@ -22,11 +24,11 @@ def main() -> int:
             if a != b:
                 mismatches.append((str(p["parent_asin"]), a, b))
     ok = not mismatches
-    print("规则一致性反向验证")
+    print("Rule parity check")
     print(f"  [{'PASS' if ok else 'FAIL'}] src.coarse_category == evaluator.coarse_category"
-          f"   比对 {total} 件，不一致 {len(mismatches)} 件")
+          f"   compared {total} products, {len(mismatches)} mismatches")
     for asin, a, b in mismatches[:5]:
-        print(f"     {asin}: 官方={a!r} 我方={b!r}")
+        print(f"     {asin}: official={a!r} ours={b!r}")
     return 0 if ok else 1
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
-"""提交入口：TechJam Track 4 对话购物 Agent。
+"""Submission entry point: TechJam Track 4 conversational shopping agent.
 
-设计原则（详见 README）：
-  - **完全离线**。无网络、无外部 API、无向量库，只用 Python 标准库。
-    依据是官方提交规则：最终评分时可能关闭网络访问。
-  - **纯加性打分**，除类目剪枝外不做任何硬过滤。
-  - 每一轮都返回满 10 条推荐——每轮都是一次免费的命中机会。
+Design principles (see README):
+  - **Fully offline.** No network, no model API, no vector store — Python
+    standard library only. The submission rules state that organiser policy may
+    disable network access for official final scoring.
+  - **Strictly additive scoring**, with no hard filtering beyond category pruning.
+  - **A full slate of 10 recommendations every turn** — every turn is a free
+    chance to hit.
 
-接口遵循 docs/agent_api_contract.json。
+Conforms to docs/agent_api_contract.json.
 """
 
 from __future__ import annotations
@@ -18,9 +20,8 @@ from src.catalog import Catalog
 from src.ranker import Ranker
 from src.session_state import SessionState
 
-# 追问顺序按 T1 实测的信息量排序：
-# feature 50.5% / material 37.8% / color 7.5% / style 2.4% / size 1.4% / use_case 0.5%
-# 先问信息量最大的，这就是赛题 Innovation Directions 里说的 question-value estimation。
+# Fallback ordering, used only once every attribute the policy can estimate has
+# already been asked. The live ordering is computed per turn by AskPolicy.
 ASK_ORDER = (
     "feature", "material", "color", "style",
     "size", "use_case", "budget", "brand", "category",
@@ -41,13 +42,15 @@ class Agent:
         )
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        """官方评测器规定：抛异常、输出非法、超时，都按 miss 计。
+        """The official evaluator counts an exception, malformed output, or a
+        timeout as a miss, so this wraps the core path.
 
-        所以这里包一层总兜底。它**不是**用来掩盖 bug 的——
-        内部所有验收和自测都跑在未包裹的 _respond 上，出错会照常炸出来；
-        这一层只负责保证：万一评测环境里出现我们没预料到的输入，
-        损失是「这一轮排序差一点」，而不是「整场归零」。
-        降级路径本身有反向验证，见 tools/failure_drill.py。
+        It is **not** here to hide bugs: every internal check runs against the
+        unwrapped `_respond`, so failures surface normally during development.
+        Its only job is to guarantee that an unanticipated input in the scoring
+        environment costs one turn of ranking quality rather than the session.
+        The degraded path has its own reverse verification in
+        `tools/failure_drill.py`.
         """
         try:
             return self._respond(session_id, user_message, turn, top_k)
@@ -55,9 +58,10 @@ class Agent:
             return self._fallback(session_id, top_k)
 
     def _fallback(self, session_id: str, top_k: int) -> dict:
-        """降级：交出上一轮的推荐；连上一轮都没有就交该类目下最热门的。
+        """Degrade to the previous turn's recommendations, or to the most popular
+        items in the category if there is no previous turn.
 
-        绝不返回空列表——空列表等于主动放弃这一轮的命中机会。
+        Never returns an empty list — an empty slate forfeits the turn's chance to hit.
         """
         state = self._sessions.get(session_id)
         if state is not None and state.last_recommendations:
@@ -74,11 +78,12 @@ class Agent:
 
     def _respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         state = self._sessions.get(session_id)
-        if state is None:                      # 防御：reset 没被调用也不能崩
+        if state is None:                      # defensive: never crash if reset was skipped
             self.reset(session_id, {})
             state = self._sessions[session_id]
 
-        # 用当前候选池当裁判，消解约束切分歧义（见 src/extract._split_clause）
+        # The candidate pool acts as the arbiter for constraint segmentation —
+        # see src/extract._split_clause.
         state.observe(
             user_message,
             turn,
@@ -95,7 +100,7 @@ class Agent:
             state.asked.append(ask)
 
         picks = [asin for asin, _ in ranked]
-        state.last_recommendations = picks      # 供异常降级使用
+        state.last_recommendations = picks      # used by the failure fallback
 
         return {
             "message": self._phrase(ask, state),
@@ -104,26 +109,29 @@ class Agent:
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
-    # ── 追问策略 ────────────────────────────────────────────────────
+    # ── Clarification strategy ──────────────────────────────────────
     def _next_attribute(self, state: SessionState, candidates: list[str]) -> str | None:
-        if state.saturated():        # 4 条约束已问全，再问榨不出新东西
+        if state.saturated():        # the customer has stopped contributing
             return None
-        # 每轮对**当前还活着的**候选池重算各属性分歧度，选期望信息增益最大的那个。
-        # 走死顺序等于假设所有场次的候选池长得一样，那显然不成立。
+        # Attribute divergence is recomputed each turn over the candidates still
+        # alive. A fixed order would assume every session's pool looks the same,
+        # which it plainly does not.
         #
-        # 连续两轮前几名纹丝不动 = 这条追问路线没在收敛，切换选择方式：
-        # 放弃先验加权，改为纯分歧度优先——不管顾客大概率有没有这类偏好，
-        # 只挑最能把候选池切开的属性。这是运行时换轨（支柱 III）。
+        # If the leaders have not moved for two turns, this line of questioning is
+        # not converging: drop the prior term and choose purely by how much an
+        # attribute splits the pool. That is runtime re-orchestration (Pillar III).
         return self.ask_policy.choose(
             candidates, state.asked, ASK_ORDER, ignore_prior=state.strategy_stalled()
         )
 
     @staticmethod
     def _phrase(attribute: str | None, state: SessionState) -> str:
-        """给顾客看的自然语言。
+        """The customer-facing natural language.
 
-        注意：官方模拟器只读 ask_attribute 字段，这段话不参与打分。
-        写好它是为了 Demo 和评委，不是为了分数——所以不在这里花时间调优。
+        Worth stating plainly: the official simulator reads only the structured
+        `ask_attribute` field, so this text has no effect on the score. It is
+        written for the demo and for human readers, and no time was spent tuning
+        it for points.
         """
         if attribute is None:
             return "I think I've got what I need — here are my top picks for you."

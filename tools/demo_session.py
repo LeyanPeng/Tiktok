@@ -1,14 +1,15 @@
-"""逐轮播放一场完整会话，供 Demo 视频录制与人工检查使用。
+"""Replay one complete session turn by turn.
 
-官方 Deliverables 要求 "One demonstrated multi-turn session"。
-这个脚本把评测器内部发生的事全部摊开：顾客说了什么、我们抽到了什么、
-候选池怎么收敛、为什么问这个属性、目标商品排到第几名。
+The official deliverables ask for "one demonstrated multi-turn session". This
+script lays out everything that happens inside the evaluator: what the customer
+said, what we extracted, how the candidate pool converges, why a particular
+attribute is asked next, and where the hidden target ranks.
 
-用法:
-    python -m tools.demo_session                       # 默认放一场 intent_override
+Usage:
+    python -m tools.demo_session                       # an intent_override session
     python -m tools.demo_session --scenario buying
     python -m tools.demo_session --sample public_0002
-    python -m tools.demo_session --scenario browsing --failure   # 挑一场没拿第1名的
+    python -m tools.demo_session --scenario browsing --failure   # a session we get wrong
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ def load_products(path: str) -> dict[str, dict]:
 
 def short(text: str, width: int = 68) -> str:
     text = " ".join(str(text).split())
-    return text if len(text) <= width else text[: width - 1] + "…"
+    return text if len(text) <= width else text[: width - 1] + "..."
 
 
 def play(sample: dict, products: dict, agent: Agent) -> None:
@@ -53,12 +54,12 @@ def play(sample: dict, products: dict, agent: Agent) -> None:
     )
 
     print(BAR)
-    print(f" 会话 {sample['sample_id']}   场景 {sample['scenario_type']}"
-          f"   难度 {sample.get('difficulty_bucket', '?')}")
-    print(f" 隐藏目标  {target}  {short(products[target].get('title'), 50)}")
-    print(f" 类目桶    {category!r}   桶内 {len(agent.catalog.candidates(category))} 件"
-          f"   (全目录 {len(agent.catalog)} 件)")
-    print(f" 顾客档案  {short(sample['user_profile'].get('summary'), 62)}")
+    print(f" session {sample['sample_id']}   scenario {sample['scenario_type']}"
+          f"   difficulty {sample.get('difficulty_bucket', '?')}")
+    print(f" hidden target   {target}  {short(products[target].get('title'), 46)}")
+    print(f" category bucket {category!r}   {len(agent.catalog.candidates(category))} items"
+          f"   (catalog holds {len(agent.catalog)})")
+    print(f" customer profile {short(sample['user_profile'].get('summary'), 58)}")
     print(BAR)
 
     session_id = f"demo_{sample['sample_id']}"
@@ -69,9 +70,10 @@ def play(sample: dict, products: dict, agent: Agent) -> None:
 
     message, _ = spoken_initial(full, category, disclosed)
     for turn in range(1, official.MAX_TURNS + 1):
-        print(f"\n 第 {turn} 轮")
+        print()
+        print(f" Turn {turn}")
         print(SEP)
-        print(f"  顾客   {short(message, 66)}")
+        print(f"  customer   {short(message, 64)}")
 
         before = len(agent._sessions[session_id].slots)
         response = agent.respond(session_id, message, turn, official.TOP_K)
@@ -80,40 +82,43 @@ def play(sample: dict, products: dict, agent: Agent) -> None:
         picked_up = [s.text for s in state.slots[before:]]
         if picked_up:
             for text in picked_up:
-                print(f"  抽取   + {short(text, 62)}")
+                print(f"  extracted  + {short(text, 60)}")
         else:
-            print("  抽取   （本轮没有新信息）")
+            print("  extracted  (nothing new this turn)")
 
         if state.override_turn == turn:
-            print("  状态   检测到改主意 → 旧槽位降权 ×0.35（不删除，仍指向同一商品）")
+            print("  state      intent override detected -> earlier slots decayed x0.35")
+            print("             (decayed, not erased: they still point at the same product)")
 
         ranked = [r["parent_asin"] for r in response["recommendations"]]
         position = ranked.index(target) + 1 if target in ranked else None
-        print(f"  排序   已知 {len(state.slots)} 条约束"
-              f" · 意图轨 {state.intent}"
-              f" · 前十名{'含目标，第 ' + str(position) + ' 名' if position else '不含目标'}")
+        where = f"target at rank {position}" if position else "target not in top 10"
+        print(f"  ranking    {len(state.slots)} constraints known"
+              f" | track {state.intent} | {where}")
         for rank, asin in enumerate(ranked[:3], 1):
-            mark = " ★" if asin == target else "  "
-            print(f"         {rank}.{mark} {asin}  {short(agent.catalog.title[asin], 46)}")
+            mark = " *" if asin == target else "  "
+            print(f"             {rank}.{mark} {asin}  {short(agent.catalog.title[asin], 44)}")
 
         ask = response["ask_attribute"]
         if ask:
-            reason = "策略换轨(纯分歧度)" if state.strategy_stalled() else "先验×候选池分歧度"
-            print(f"  追问   {ask}  ← {reason}")
+            reason = ("strategy switch: pure pool divergence" if state.strategy_stalled()
+                      else "prior x live pool divergence")
+            print(f"  asks       {ask}  <- {reason}")
         else:
-            print("  追问   （已问满 4 条约束，不再打扰顾客）")
-        print(f"  Agent  {short(response['message'], 66)}")
+            print("  asks       (nothing further; the customer has stopped contributing)")
+        print(f"  agent      {short(response['message'], 64)}")
 
         if position and override_applied:
-            print(f"\n{BAR}")
-            print(f" 命中：第 {turn} 轮，第 {position} 名"
-                  f"   → 本场 MTTC={turn}  RR={1 / position:.4f}")
-            print(f" Token 消耗 {response['usage']['prompt_tokens']}"
-                  f" + {response['usage']['completion_tokens']}   全程离线")
+            print()
+            print(BAR)
+            print(f" Converted on turn {turn} at rank {position}"
+                  f"   ->  MTTC={turn}  RR={1 / position:.4f}")
+            print(f" Tokens used {response['usage']['prompt_tokens']}"
+                  f" + {response['usage']['completion_tokens']}   fully offline")
             print(BAR)
             return
         if position and not override_applied:
-            print("         （改主意尚未发生，按规则本轮不计命中）")
+            print("             (the override has not happened yet, so this does not count)")
 
         if turn == official.MAX_TURNS:
             break
@@ -125,18 +130,21 @@ def play(sample: dict, products: dict, agent: Agent) -> None:
         else:
             message, _, boundary_used = spoken_reply(full, ask, disclosed, boundary_used)
 
-    print(f"\n{BAR}\n 10 轮用尽，未命中\n{BAR}")
+    print()
+    print(BAR)
+    print(" Ten turns exhausted without converting")
+    print(BAR)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="逐轮播放一场会话")
+    parser = argparse.ArgumentParser(description="Replay one session turn by turn")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--scenario", default="intent_override",
                         choices=["buying", "browsing", "intent_override", "boundary"])
-    parser.add_argument("--sample", default=None, help="直接指定 sample_id")
+    parser.add_argument("--sample", default=None, help="pick a specific sample_id")
     parser.add_argument("--failure", action="store_true",
-                        help="挑一场没拿到第 1 名的，用于展示失败案例")
+                        help="pick a session where the target did not reach rank 1")
     args = parser.parse_args()
 
     products = load_products(args.catalog)

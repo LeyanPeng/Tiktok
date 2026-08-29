@@ -1,11 +1,15 @@
-"""T5 反向验证：测试台本身是不是个假绿灯？
+"""Reverse verification: are the evaluation benches fake green lights?
 
-一个永远给高分的测试台，比没有测试台更危险——它会让我们在错误的方向上加速。
-所以先证明它会报警：塞一个必然失败的 Agent 进去，分数必须塌到接近 0。
+A bench that always reports a good score is more dangerous than no bench at all —
+it accelerates work in the wrong direction. So before trusting either bench, prove
+it can fail: feed it an agent that cannot possibly work, and require the score to
+collapse.
 
-问「这里坏了谁会知道」，答案是「没人」的地方，都要有这一步。
+Wherever the answer to "if this broke, who would find out?" is "nobody", this step
+is mandatory.
 
-验收：哑 Agent 在原版和扰动版两条测试台上，TechnicalScore 都 < 0.05
+Acceptance: the dummy agent scores below 0.05 on both the verbatim and the
+paraphrased bench.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ THRESHOLD = 0.05
 
 
 class BrokenAgent:
-    """什么都不干的 Agent。分数必须塌。"""
+    """An agent that does nothing. Its score must collapse."""
 
     def __init__(self, catalog_path: str = "data/catalog.jsonl") -> None:
         self.catalog_path = catalog_path
@@ -45,16 +49,17 @@ def main() -> int:
     install_paraphrase()
     perturbed = score_with(BrokenAgent(), catalog, dataset)
 
-    checks = [("原版测试台会报警", plain), ("扰动版测试台会报警", perturbed)]
-    print("T5 反向验证 · 测试台是否会响")
+    checks = [("verbatim bench can fail", plain), ("paraphrased bench can fail", perturbed)]
+    print("Bench self-test: can the benches fail?")
     ok = True
     for name, value in checks:
         passed = value < THRESHOLD
         ok &= passed
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}"
-              f"   哑 Agent 得分={value} (要求 < {THRESHOLD})")
+              f"   dummy agent scored {value} (must be < {THRESHOLD})")
     if not ok:
-        print("\n测试台没有报警——它是个假绿灯，后续所有分数都不可信。")
+        print("\nThe bench did not fail. It is a fake green light, and every score it\n"
+              "has reported so far is untrustworthy.")
     return 0 if ok else 1
 
 

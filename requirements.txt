@@ -1,3 +1,7 @@
-# 本项目不依赖任何第三方包。
-# 全程仅使用 Python 标准库——这是刻意的设计，见 README「Why it is offline by design」。
-# Python 3.10+（开发于 3.14.4）
+# Intentionally empty: this project has no third-party dependencies.
+#
+# The entire scoring path runs on the Python standard library alone — no model
+# API, no embeddings, no vector store, no network access. See README, "Why it is
+# offline by design".
+#
+# Requires Python 3.10 or later. Developed and verified on 3.14.4.

@@ -1,33 +1,41 @@
-"""T12 反向验证 · 故障演练
+"""Fault drill: is the failure fallback real, or is it decoration?
 
-`Agent.respond` 外面包了一层 try/except。这层东西最危险的地方在于：
-**它坏了没人会知道** —— 如果降级路径本身返回空列表，分数会静静地塌掉，
-而日志上什么都看不见，我们还以为兜底生效了。
+`Agent.respond` wraps the core path in try/except. The dangerous property of such
+a wrapper is that **if it is broken, nobody finds out**: were the degraded path to
+return an empty slate, the score would quietly sag and the logs would show nothing
+at all, while we went on believing the fallback was doing its job.
 
-所以必须亲手制造故障，证明两件事：
-  1. 出错时进程不崩、仍然交出 10 条合法推荐（不是空列表）
-  2. 损失是「这一轮差一点」而不是「整场归零」
+So the fault is injected deliberately, to establish two things:
+  1. the process survives and still returns ten valid recommendations, not an
+     empty list;
+  2. the wrapper itself has no side effect on the healthy path.
 
-这不是在测 Agent 好不好，是在测**兜底本身是不是个摆设**。
+This does not measure how good the agent is. It measures whether the safety net
+is actually a net.
 
-验收对照的选择（这一点定错过一次，记下来）：
-最初把验收线定成「注入故障后掉分 < 0.02」。那是错的——
-每 3 轮炸一次还要求几乎不掉分，等于要求降级路径和正常路径一样好，逻辑上不可能。
-它测不出我们真正关心的性质。
+On choosing the right comparison — a mistake worth recording:
 
-改成「有兜底的受伤 vs 没兜底的受伤」对照后，量出来的结果是 **-0.001**：
-兜底基本没救回任何分。原因是官方评测器自己就有异常处理
-（`except Exception: response = {空}`），单轮抛异常只损失那一轮的推荐，
-会话继续、下一轮就恢复；而 71.5% 的命中发生在第 1 轮，丢一轮几乎不花钱。
-**「异常 = 灾难」这个前提本身是错的。**
+The acceptance bar started out as "score drops by less than 0.02 under injection".
+That was wrong. Failing one turn in three and still demanding almost no score loss
+amounts to requiring the degraded path to be as good as the healthy one, which is
+not achievable. It measured nothing we cared about.
 
-所以「救回 > 0.10」不再作为门槛，改为实测发现如实上报。
-兜底继续保留：零成本、保证契约（永不返回空列表）、且在真实部署里仍是正确工程。
+Reframed as "injured with fallback vs injured without fallback", the measured
+answer was **-0.001**: the fallback rescues essentially nothing. The official
+evaluator already has its own `except Exception: response = {empty}`, so a single
+raised exception costs only that turn's recommendations and the session recovers on
+the next one — and since 71.5% of hits land on turn 1, losing one turn is nearly
+free. The premise that "an exception is a catastrophe" was simply false.
 
-验收（只留能测出真实性质的三条）：
-  - 全程零异常逃逸
-  - 降级从不返回空推荐（空列表 = 主动放弃这一轮的命中机会）
-  - 健康态分数不受 wrapper 影响（这层包装必须没有副作用）
+So "rescues more than 0.10" is no longer a gate; the rescue figure is reported as
+a measured finding. The fallback stays, for contract compliance (never an empty
+slate) and because it remains correct engineering in a real deployment — not
+because it earns points.
+
+Acceptance keeps only the three properties that can actually be tested:
+  - no exception escapes
+  - the degraded path never returns an empty slate
+  - the wrapper has no effect on the healthy score
 """
 
 from __future__ import annotations
@@ -38,13 +46,14 @@ import evaluator.local_evaluator as official
 
 from agent import Agent
 
-FAIL_EVERY = 3          # 每 3 轮炸一次，覆盖首轮与中途两种时机
+FAIL_EVERY = 3          # inject on every third call, covering turn 1 and mid-session
 
 
 class ChaosAgent(Agent):
-    """周期性在核心路径上抛异常的 Agent。
+    """Raises periodically inside the core path.
 
-    with_fallback=False 时让异常直接逃到评测器，模拟「没写兜底」的世界。
+    With `with_fallback=False` the exception escapes to the evaluator, simulating
+    a world in which no fallback was written.
     """
 
     def __init__(self, catalog_path: str = "data/catalog.jsonl", with_fallback: bool = True) -> None:
@@ -67,9 +76,9 @@ class ChaosAgent(Agent):
             self._respond = boom              # type: ignore[method-assign]
             try:
                 if not self.with_fallback:
-                    raise RuntimeError("injected fault")   # 不接，直接抛给评测器
+                    raise RuntimeError("injected fault")   # let it reach the evaluator
                 result = super().respond(session_id, user_message, turn, top_k)
-            except Exception:                 # 兜底没接住 —— 这才是真正的失败
+            except Exception:                 # the fallback failed to catch — a real failure
                 self.escaped += 1
                 if self.with_fallback:
                     raise
@@ -86,12 +95,13 @@ class ChaosAgent(Agent):
 
 
 class UnguardedAgent(Agent):
-    """绕过 try/except 包装，直接走核心路径。
+    """Bypasses the try/except wrapper and calls the core path directly.
 
-    用来验证「这层包装没有副作用」。原先这一条是拿健康态分数去比一个写死的
-    0.891142 —— 那意味着 agent 每改进一次，这个测试就假失败一次，
-    而且它比的是「分数等于某个数」，不是「包装没有副作用」这个真正要验的性质。
-    改成同一次运行内的自对照：包装版 vs 绕过版，必须逐位相同。
+    Used to verify the wrapper has no side effect. This check originally compared
+    the healthy score against a hardcoded 0.891142, which was wrong twice over: it
+    would report a false failure every time the agent legitimately improved, and it
+    tested "the score equals a number" rather than "the wrapper changes nothing".
+    Comparing guarded against unguarded within a single run tests the actual property.
     """
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
@@ -116,28 +126,31 @@ def main() -> int:
     rescued = with_fb - without_fb
 
     checks = [
-        (f"注入 {guarded.injected} 次故障后仍不崩", guarded.escaped == 0, f"逃逸异常={guarded.escaped}"),
-        ("降级从不返回空推荐", guarded.empty_returns == 0, f"空返回={guarded.empty_returns}"),
-        ("wrapper 无副作用（同一次运行内自对照）",
+        (f"survives {guarded.injected} injected faults", guarded.escaped == 0,
+         f"escaped exceptions={guarded.escaped}"),
+        ("degraded path never returns an empty slate", guarded.empty_returns == 0,
+         f"empty returns={guarded.empty_returns}"),
+        ("wrapper has no side effect (self-comparison within one run)",
          abs(healthy - unguarded) < 1e-9,
-         f"包装版={healthy} 绕过版={unguarded}"),
+         f"guarded={healthy} unguarded={unguarded}"),
     ]
 
-    print("T12 反向验证 · 故障演练")
-    print(f"  健康态 · 有 wrapper     {healthy}")
-    print(f"  健康态 · 绕过 wrapper   {unguarded}   [自对照，取代写死的基线]")
-    print(f"  每 {FAIL_EVERY} 轮炸一次 · 有兜底   {with_fb}")
-    print(f"  每 {FAIL_EVERY} 轮炸一次 · 无兜底   {without_fb}")
-    print(f"  → 兜底救回              {rescued:+.6f}   [实测发现，非门槛]")
-    print("     评测器自身已吸收单轮异常，故 agent 侧兜底对分数几乎无贡献。")
-    print("     保留它的理由是契约保证与真实部署，不是分数。")
+    print("Fault drill")
+    print(f"  healthy, wrapped          {healthy}")
+    print(f"  healthy, wrapper bypassed {unguarded}   [self-comparison, replaces a hardcoded baseline]")
+    print(f"  fault every {FAIL_EVERY} turns, with fallback     {with_fb}")
+    print(f"  fault every {FAIL_EVERY} turns, without fallback  {without_fb}")
+    print(f"  -> rescued by the fallback  {rescued:+.6f}   [measured finding, not a gate]")
+    print("     The evaluator already absorbs a single-turn exception, so an")
+    print("     agent-side fallback contributes almost nothing to the score.")
+    print("     It is kept for contract compliance and real deployment, not points.")
     print()
     ok = True
     for name, passed, detail in checks:
         ok &= passed
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}   {detail}")
     if not ok:
-        print("\n兜底是个摆设——出事时会静默丢分，日志上还看不出来。")
+        print("\nThe fallback is decoration: it would lose score silently, with nothing in the logs.")
     return 0 if ok else 1
 
 

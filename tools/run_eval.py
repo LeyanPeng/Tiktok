@@ -1,12 +1,13 @@
-"""跑我们的 Agent 过官方评测器。
+"""Run our Agent through the official evaluator.
 
-官方 evaluator/local_evaluator.py 硬编码 import starter.agent，而 evaluator/ 属于
-判卷标准、冻结不许改。所以这里复用它的 evaluate()，只把 Agent 换成我们的。
+The official `evaluator/local_evaluator.py` hardcodes `import starter.agent`, and
+the evaluator is judging apparatus that we treat as frozen. So this reuses its
+`evaluate()` and substitutes only the Agent.
 
-用法:
-    python -m tools.run_eval                    # 跑分
-    python -m tools.run_eval --gate 0.75        # 加验收线，未达标退出码 1
-    python -m tools.run_eval --paraphrase       # 话术改写扰动版（T5 起使用）
+Usage:
+    python -m tools.run_eval                    # score
+    python -m tools.run_eval --gate 0.891       # score with an acceptance gate
+    python -m tools.run_eval --paraphrase       # against paraphrased customer phrasing
 """
 
 from __future__ import annotations
@@ -25,10 +26,14 @@ PROGRESS_KEYS = ("hit_rate_at_10", "mrr", "mttc", "efficiency", "recommended_tec
 
 
 def install_paraphrase() -> None:
-    """给模拟器套一层话术改写。
+    """Wrap the simulator so it rephrases the customer's messages.
 
-    官方规格说私有集「可能加入自然语言改写」，但改写不决定正确性。
-    这一层用来量化：如果话术变了，我们会掉多少分。
+    The official specification notes that natural-language paraphrasing may be
+    added to the private split, and that it cannot decide correctness. This layer
+    quantifies what such a rewrite would cost us.
+
+    Note that the rewrite below is our own invention: the private split may
+    paraphrase differently, or not at all.
     """
     base_initial, base_reply = official.initial_message, official.customer_reply
 
@@ -48,13 +53,13 @@ def install_paraphrase() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="跑我们的 Agent 过官方评测器")
+    parser = argparse.ArgumentParser(description="Run our Agent through the official evaluator")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--output", default="docs/our_results.json")
-    parser.add_argument("--gate", type=float, default=None, help="验收线：TechnicalScore 下限")
-    parser.add_argument("--paraphrase", action="store_true", help="启用话术改写扰动")
-    parser.add_argument("--label", default="", help="写进结果文件的标记")
+    parser.add_argument("--gate", type=float, default=None, help="acceptance floor for TechnicalScore")
+    parser.add_argument("--paraphrase", action="store_true", help="paraphrase the customer's phrasing")
+    parser.add_argument("--label", default="", help="tag written into the results file")
     args = parser.parse_args()
 
     if args.paraphrase:
@@ -79,24 +84,25 @@ def main() -> int:
     Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     score = result["recommended_technical_score"]
-    mode = "话术改写版" if args.paraphrase else "离线原版"
-    print(f"评测模式  {mode}")
-    print(f"耗时      建索引 {result['run_meta']['index_build_seconds']}s"
-          f" / 评测 {result['run_meta']['eval_seconds']}s"
-          f" / 每场 {result['run_meta']['seconds_per_session']}s")
-    print(f"Token     {result['reported_token_usage']['total_tokens']}  (零调用 = 可断网运行)")
+    mode = "paraphrased" if args.paraphrase else "offline, verbatim"
+    print(f"Mode      {mode}")
+    print(f"Timing    index {result['run_meta']['index_build_seconds']}s"
+          f" / eval {result['run_meta']['eval_seconds']}s"
+          f" / {result['run_meta']['seconds_per_session']}s per session")
+    print(f"Tokens    {result['reported_token_usage']['total_tokens']}"
+          f"  (zero calls = runs with the network disabled)")
     print()
     for key in PROGRESS_KEYS:
         print(f"  {key:<32} {result[key]}")
-    print("\n分场景")
+    print("\nBy scenario")
     for name, info in result["scenario_metrics"].items():
         print(f"  {name:<16} n={info['sample_count']:<4}"
               f" hit={info['hit_rate_at_10']:<8} mrr={info['mrr']:<10} mttc={info['mttc']}")
 
     if args.gate is not None:
         passed = score >= args.gate
-        print(f"\n验收\n  [{'PASS' if passed else 'FAIL'}] TechnicalScore >= {args.gate}"
-              f"   实际={score}")
+        print(f"\nAcceptance\n  [{'PASS' if passed else 'FAIL'}] TechnicalScore >= {args.gate}"
+              f"   actual={score}")
         return 0 if passed else 1
     return 0
 

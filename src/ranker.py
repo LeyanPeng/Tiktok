@@ -1,28 +1,36 @@
-"""候选打分与排序。
+"""Candidate scoring and ranking.
 
-核心立场：**纯加性打分，全程不做硬过滤**（类目剪枝除外，它的落桶率实测 200/200）。
+Core stance: **strictly additive scoring, no hard filtering anywhere** — the one
+exception being category pruning, whose target containment is measured at 200/200.
 
-理由来自 ProductAgent 的教训：把用户说的条件全部 AND 起来做结构化过滤，
-听着严谨，实际后期 55% 的查询返回空集——正确答案被自己滤掉了。
-加性打分让每个条件只是「加分项」，说错一个不至于全盘皆输。
+The reason comes from ProductAgent. Conjoining every stated condition into one
+structured filter sounds rigorous; in practice their LLM-generated SQL produced
+trivial queries in 55.36% of cases with GPT-4, degenerate enough to stop
+discriminating. Additive scoring makes every condition a contribution rather than
+a veto, so one mis-parsed constraint costs a little ranking quality instead of
+eliminating the correct answer outright.
 
-两级信号：
-  1. 原句子串命中 —— 约束是从商品 features/details 原样切下来的，等于拿到商品指纹，权重极高
-  2. IDF 加权词覆盖 —— 原句没对上时的软兜底，罕见词命中比常见词更值钱
+Two signals:
+  1. Verbatim span match — constraints are sliced straight out of a product's own
+     features / details, so matching one is effectively fingerprint matching.
+  2. IDF-weighted token coverage — the graded fallback when a span does not match
+     verbatim. Rare terms count for more than common ones.
 """
 
 from __future__ import annotations
 
 from .catalog import Catalog, tokenize
 
-# 原句在商品文本里被原样找到时的基础分。
-# 取得远高于词覆盖的上限（3.0），确保「指纹命中」永远压过「词碰巧撞上」。
+# Base score when a constraint is found verbatim in a product's copy. Set far
+# above the coverage ceiling (3.0) so a fingerprint match always beats a
+# coincidental term overlap.
 VERBATIM_BASE = 12.0
 
-# 原句越长越独特，每多一个词额外加一点
+# Longer spans are more distinctive, so each additional word adds a little.
 VERBATIM_PER_WORD = 0.35
 
-# 词覆盖率的满分。刻意压低——它只是兜底，不该和指纹信号抢话语权
+# Ceiling for token coverage. Deliberately low: this is a fallback and must not
+# compete with the fingerprint signal.
 COVERAGE_WEIGHT = 3.0
 
 
@@ -40,7 +48,8 @@ class Ranker:
             if needle in blob:
                 total += weight * (VERBATIM_BASE + VERBATIM_PER_WORD * len(needle.split()))
                 continue
-            # 兜底：这条约束的词，有多少比例出现在商品文本里（按 IDF 加权）
+            # Fallback: what fraction of this constraint's terms appear in the
+            # product's copy, weighted by inverse document frequency.
             terms = tokenize(needle)
             if not terms:
                 continue
@@ -57,27 +66,36 @@ class Ranker:
         constraints: list[tuple[str, float]],
         top_k: int = 10,
     ) -> list[tuple[str, float]]:
-        """返回 (asin, score) 前 top_k 条，按分数降序。
+        """Return the top_k (asin, score) pairs, best first.
 
-        没有任何约束时也必须返回满 top_k 条——每一轮都是一次免费的命中机会，
-        空着不交等于白白浪费一轮（MTTC 会因此变差）。
+        A full slate is returned even with no constraints known. Every turn is a
+        free chance to hit; returning fewer than top_k throws that chance away and
+        shows up directly in MTTC.
         """
         prior = self.catalog.prior
         if not constraints:
-            # Browsing 轨第一轮：顾客还没说任何条件，按目录顺序返回等于浪费一轮。
-            # 零信息下最好的猜测是人气最高的商品（item popularity 基线）。
+            # Browsing track, turn one: the customer has stated nothing, so
+            # returning catalog order wastes the turn. Under zero information the
+            # best guess is the most popular item — the item-popularity baseline.
             ordered = sorted(candidates, key=lambda a: -prior.get(a, 0.0))
             return [(asin, 0.0) for asin in ordered[:top_k]]
 
         scored = [(asin, self.score_one(asin, constraints)) for asin in candidates]
 
-        # 两级严格字典序：先按约束得分，完全打平才看人气先验。
-        # 这样人气永远不可能盖过约束信号，只在没有信号可区分时才发言。
+        # Strict lexicographic order: constraint score first, popularity only on an
+        # exact tie. Popularity can therefore never override a constraint signal;
+        # it speaks only when there is nothing else to separate two candidates.
         #
-        # 这里刻意**没有**更复杂的拆并列逻辑。试过三种，全部实测为负或无效：
-        #   - 稀有度做乘数            0.891 -> 0.876（目标只匹配常见约束时信号被打死）
-        #   - 稀有度做次级排序键      0.891 -> 0.891（第1轮只有1条约束时，并列各方稀有度相同，拆不开）
-        #   - 字段加权做次级排序键    0.891 -> 0.881
-        # 详细归因见 PROGRESS.md 与技术报告。留一个简单且已验证的版本，胜过留一个复杂且更差的。
+        # There is deliberately no more elaborate tie-breaking here. Three variants
+        # were built and measured, and all were neutral or worse:
+        #   rarity as a score multiplier      0.891 -> 0.876  (signal is annihilated
+        #                                     when the target only matches common
+        #                                     constraints; Hit Rate 1.00 -> 0.98)
+        #   rarity as a secondary sort key    0.891 -> 0.891  (with one constraint
+        #                                     known, tied candidates share a rarity
+        #                                     profile, so nothing separates them)
+        #   field weighting as a sort key     0.891 -> 0.881
+        # A simple version that has been verified beats a complex version that is
+        # worse. See the technical report for the full attribution.
         scored.sort(key=lambda pair: (-pair[1], -prior.get(pair[0], 0.0)))
         return scored[:top_k]

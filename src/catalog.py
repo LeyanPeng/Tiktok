@@ -1,8 +1,10 @@
-"""目录加载与索引。
+"""Read-only in-memory catalog: indexing, bucketing, and priors.
 
-重要约束：本模块（以及整个 src/）**不允许 import evaluator/**。
-提交时评测方跑的是他们自己的 harness，我们这份 evaluator/ 副本不会存在。
-所以类目规则在这里独立实现一份，并由 tools/rule_parity.py 反向验证它与官方逐字一致。
+Hard constraint: this module — and all of `src/` — must never import from
+`evaluator/`. The organiser runs their own harness, where our copy of the
+evaluator does not exist. The category rule is therefore reimplemented here
+independently, and `tools/rule_parity.py` verifies on every run that the
+reimplementation matches the official one across all 50,000 products.
 """
 
 from __future__ import annotations
@@ -15,25 +17,24 @@ from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-# 拼接桶级文本时的分隔符。用换行保证不会跨商品拼出并不存在的片段。
+# Separator used when concatenating a bucket into one string. A newline
+# guarantees we never synthesise a span that straddles two products.
 SEPARATOR = "\n"
 
-# 官方 coarse_category 会剔除的顶层类目名
+# Top-level category names the official `coarse_category` strips out.
 EXCLUDED_CATEGORIES = {
     "clothing",
     "clothing shoes & jewelry",
     "clothing, shoes & jewelry",
 }
 
-# 参与检索的字段。顺序即 Catalog.fields 里的存放顺序。
+# Fields that participate in retrieval. This order is also the order in
+# `Catalog.fields`.
 TEXT_FIELDS = ("title", "categories", "features", "details", "store", "description")
 
-# 每件商品最多统计前几条片段。模拟器的 intent_card 也只取前几条，
-# 取太多会让长描述压倒统计。
-SPANS_PER_PRODUCT = 6
-
-# 属性词表。与官方 classify_constraint 用同一批词，保证我们判断的「属性」
-# 和模拟器判断的是同一个东西。
+# Attribute vocabularies. Deliberately the same word lists the official
+# `classify_constraint` uses, so the attribute we reason about and the attribute
+# the simulator reasons about are the same thing.
 ATTRIBUTE_VOCAB: dict[str, tuple[str, ...]] = {
     "material": ("cotton", "polyester", "nylon", "leather", "wool",
                  "spandex", "silk", "rayon", "fabric"),
@@ -49,8 +50,8 @@ ATTRIBUTE_RE = {
 }
 PRICE_RE = re.compile(r"(?:\$|<=|under)\s*\d")
 
-
-# 顾客一场会提到的约束条数。模拟器按同样的条数从商品文案里取。
+# How many constraints a customer states in one session. The simulator draws the
+# same number of spans from the product's own copy.
 CONSTRAINTS_PER_SESSION = 4
 
 MATERIAL_FIRST_RE = re.compile(r"\b(" + "|".join(ATTRIBUTE_VOCAB["material"]) + r")\b")
@@ -58,19 +59,48 @@ COLOR_FIRST_RE = re.compile(
     r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange)\b"
 )
 
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
+    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
+    "need", "have", "has", "was", "were", "will", "can", "am",
+}
+
+
+def spans_of(value: object) -> list[str]:
+    """Return a field's individual spans, preserving their boundaries.
+
+    `flatten()` collapses a field into one string, which destroys span
+    boundaries. The simulator slices the customer's stated requirements at
+    exactly those boundaries, so any statistic about "what kinds of constraints
+    customers state" has to be computed at span granularity — which is why it is
+    computed during catalog load, while the original structure still exists.
+    """
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [f"{key}: {item}" for key, item in value.items() if item not in (None, "", [])]
+    if isinstance(value, list):
+        return [str(item) for item in value if item not in (None, "")]
+    return [str(value)]
+
 
 def constraint_candidates(product: dict, corpus: str) -> list[str]:
-    """这件商品会被拿去当约束的那几条文案。
+    """The spans of this product that could become stated constraints.
 
-    模拟器不是均匀地从商品文案里抽片段——它先把材质提到最前、颜色提到第二，
-    再接 features / details，最后取前几条。所以「顾客会提哪类约束」的分布，
-    和「商品文案里各类片段的原始占比」并不一样：材质被系统性地抬高了。
+    The simulator does not sample product copy uniformly. It lifts a material
+    mention to position 0 and a colour mention to position 1, then appends
+    features and details and keeps the first few. So the distribution of
+    *constraint types* differs from the raw distribution of spans in product
+    copy: material is systematically over-represented.
 
-    在**整个目录**上复现这个选择过程，得到的是约束类型的总体分布，
-    而不是某 200 场会话的样本 —— 私有集抽的是不同商品，但用的是同一份目录、
-    同一套选择逻辑，所以总体分布对两边都成立。
+    Replaying that selection across the entire catalog yields the population
+    distribution of constraint types rather than a sample from 200 sessions. The
+    private split draws different products but shares this catalog and this
+    selection logic, so the population estimate holds for both.
 
-    这段逻辑与 evaluator 的 intent_card 对齐，一致性由 tools/prior_audit.py 验证。
+    This mirrors the evaluator's `intent_card`; `tools/prior_audit.py` verifies
+    the resulting distribution still matches what the public sessions show.
     """
     spans: list[str] = []
     for field in ("features", "details"):
@@ -92,7 +122,7 @@ def constraint_candidates(product: dict, corpus: str) -> list[str]:
 
 
 def classify_span(value: str) -> str:
-    """把一段商品文案归到某个属性类型。`feature` 是兜底类。"""
+    """Assign a span of product copy to an attribute type. `feature` is the catch-all."""
     low = value.lower()
     if "budget" in low or PRICE_RE.search(low):
         return "budget"
@@ -102,32 +132,8 @@ def classify_span(value: str) -> str:
     return "feature"
 
 
-STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
-    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
-    "need", "have", "has", "was", "were", "will", "can", "am",
-}
-
-
-def spans_of(value: object) -> list[str]:
-    """取出字段里的**片段列表**，保留边界。
-
-    `flatten()` 会把字段拼成一整串，片段边界就丢了。但模拟器的顾客话术恰恰是
-    按片段切出来的，所以统计「顾客会提哪类约束」必须在片段粒度上做——
-    这也是为什么这个统计要在目录加载时完成，那时原始结构还在。
-    """
-    if value is None:
-        return []
-    if isinstance(value, dict):
-        return [f"{key}: {item}" for key, item in value.items() if item not in (None, "", [])]
-    if isinstance(value, list):
-        return [str(item) for item in value if item not in (None, "")]
-    return [str(value)]
-
-
 def flatten(value: object) -> str:
-    """把 dict / list / 标量统一压成一段可检索文本。"""
+    """Collapse a dict / list / scalar into one searchable string."""
     if value is None:
         return ""
     if isinstance(value, dict):
@@ -138,10 +144,11 @@ def flatten(value: object) -> str:
 
 
 def coarse_category(values: list[str]) -> str:
-    """官方规则的独立实现：取类目路径末两级，剔除顶层大类。
+    """Independent implementation of the official rule: last two path levels,
+    top-level umbrella categories removed.
 
-    逐字对齐 evaluator.local_evaluator.coarse_category —— 一致性由
-    tools/rule_parity.py 在 50,000 件商品上全量验证。
+    Aligned character-for-character with `evaluator.local_evaluator.coarse_category`;
+    `tools/rule_parity.py` verifies that across all 50,000 products.
     """
     cleaned: list[str] = []
     for value in values:
@@ -157,27 +164,29 @@ def tokenize(text: str) -> list[str]:
 
 
 class Catalog:
-    """只读的内存目录。
+    """The read-only in-memory catalog.
 
-    构建一次约 6 秒 / 50,000 件，全程无外部依赖、无网络、无向量库。
+    Builds once in under a second for 50,000 products, with no external
+    dependency, no network, and no vector store.
     """
 
     def __init__(self, path: str | Path = "data/catalog.jsonl") -> None:
         self.path = Path(path)
         self.asins: list[str] = []
-        self.blob: dict[str, str] = {}          # 小写全文，用于原句子串匹配
-        self.tokens: dict[str, set[str]] = {}   # 去重词集，用于 IDF 覆盖率
+        self.blob: dict[str, str] = {}          # lowercased full text, for verbatim matching
+        self.tokens: dict[str, set[str]] = {}   # deduplicated token set, for IDF coverage
         self.title: dict[str, str] = {}
         self.bucket: dict[str, list[str]] = defaultdict(list)
         self.bucket_of: dict[str, str] = {}
         self.idf: dict[str, float] = {}
-        self.prior: dict[str, float] = {}   # 人气先验，只用于同分打破平局
-        self.fields: dict[str, tuple[str, ...]] = {}  # 按 TEXT_FIELDS 顺序分字段存放
-        # 商品文案里各类属性片段的条数。供 AskPolicy 现算追问先验，
-        # 取代早先写死的一组来自公开集的数字。见 src/askpolicy.derive_type_prior。
+        self.prior: dict[str, float] = {}       # popularity prior, tie-breaks only
+        self.fields: dict[str, tuple[str, ...]] = {}   # per-field text, in TEXT_FIELDS order
+        # Constraint-type tallies over product copy. Feeds the clarification prior
+        # in `src/askpolicy.derive_type_prior`, replacing what used to be a
+        # hardcoded table measured from the public session set.
         self.span_types: Counter[str] = Counter()
-        self._bucket_blob: dict[str, str] = {}  # 桶级文本缓存，见 bucket_blob()
-        self._popular: dict[str, list[str]] = {}  # 类目热门榜缓存，见 top_popular()
+        self._bucket_blob: dict[str, str] = {}         # see bucket_blob()
+        self._popular: dict[str, list[str]] = {}       # see top_popular()
         self._load()
 
     def _load(self) -> None:
@@ -198,8 +207,9 @@ class Catalog:
                 self.bucket[name].append(asin)
                 self.bucket_of[asin] = name
 
-                # 人气先验：评价数取对数 x 星级。零信息时最好的猜测就是最多人买的那件，
-                # 这正是推荐系统里 item popularity 基线的逻辑。
+                # Popularity prior: log review count x star rating. Under zero
+                # information the best guess is the item most people bought,
+                # which is exactly the item-popularity recommender baseline.
                 count = product.get("rating_number") or 0
                 stars = product.get("average_rating") or 0
                 try:
@@ -207,8 +217,9 @@ class Catalog:
                 except (TypeError, ValueError):
                     self.prior[asin] = 0.0
 
-                # 约束类型统计。只在这里做得了——出了这个循环，
-                # 原始 JSON 结构就被压成一整串，片段边界不复存在。
+                # Constraint-type tally. This can only happen here: once the loop
+                # exits, the original JSON structure has been collapsed into one
+                # string and the span boundaries no longer exist.
                 for span in constraint_candidates(product, text):
                     self.span_types[classify_span(span)] += 1
 
@@ -219,25 +230,29 @@ class Catalog:
 
         total = len(self.asins)
         self.idf = {t: math.log(total / (1 + c)) for t, c in document_freq.items()}
-        # 类目名按长度降序，供最长前缀匹配使用
+        # Longest first, for longest-prefix category matching.
         self.categories_by_length = sorted(self.bucket, key=len, reverse=True)
 
     def __len__(self) -> int:
         return len(self.asins)
 
     def candidates(self, category: str | None) -> list[str]:
-        """类目剪枝。落桶率实测 200/200，是本题唯一安全的硬过滤。"""
+        """Category pruning. Target containment measured at 200/200, which is what
+        makes this the one hard filter the system allows itself."""
         if category and category in self.bucket:
             return self.bucket[category]
         return self.asins
 
     def bucket_blob(self, category: str | None) -> str:
-        """把一个类目桶里所有商品的文本拼成一整串并缓存。
+        """Concatenate a whole category bucket into one cached string.
 
-        原本每次 verbatim 查找要逐件扫 184 个商品（184 次 Python 层循环），
-        拼成一串后变成 1 次 C 层子串查找。这让「按原文去目录里找约束」
-        从跑不动变成可行——T6 的跨句式抽取整个建立在这个优化上。
-        分隔符用换行，保证不会跨商品拼出并不存在的片段。
+        A verbatim lookup used to walk 184 products in Python. Against one
+        concatenated string it becomes a single C-level substring search. That
+        optimisation is what makes "recover constraint spans by searching the
+        catalog" fast enough to run at all.
+
+        The newline separator guarantees no span is ever matched across a product
+        boundary.
         """
         key = category or "__ALL__"
         cached = self._bucket_blob.get(key)
@@ -247,11 +262,12 @@ class Catalog:
         return cached
 
     def top_popular(self, category: str | None, k: int = 10) -> list[str]:
-        """该类目下最热门的 k 件，结果缓存。
+        """The k most popular items in a category, cached.
 
-        专供异常降级路径使用，所以必须快：原来每次现排一遍候选池，
-        类目还没识别出来时那就是对 50,000 件做全排序——
-        兜底本该是最快的路径，不该是最慢的。
+        Used by the failure fallback, which is why it must be fast. It originally
+        sorted the candidate pool on every call — and before a category is known
+        that meant sorting all 50,000 products. A fallback path should be the
+        fastest path in the system, not the slowest.
         """
         key = category or "__ALL__"
         cached = self._popular.get(key)
@@ -263,7 +279,7 @@ class Catalog:
         return cached[:k]
 
     def contains_verbatim(self, needle: str, category: str | None = None) -> bool:
-        """这一串文本，在候选池的商品原文里能否原样找到。"""
+        """Whether this text occurs verbatim in the candidate pool's product copy."""
         text = needle.strip().lower()
         if len(text) < 4:
             return False

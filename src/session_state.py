@@ -1,11 +1,13 @@
-"""会话状态机：增量槽位累积 + 意图覆盖重写 + 轮次预算。
+"""Session state machine: incremental slot accumulation, intent override, turn budget.
 
-对应赛题支柱 II「Dialog Strategy: Multi-Turn Scenario Evolution」。
+Implements Pillar II (Dialog Strategy: Multi-Turn Scenario Evolution).
 
-关于覆盖重写的一个刻意设计：顾客说「不要之前那个」时，我们**降权**旧槽位而不是删除。
-理由是本题的全部约束都源自同一件目标商品——旧信息依然指向正确答案，
-直接抹掉等于自伤召回。降权既表达了「新意图优先」，又不丢证据。
-这个取舍会写进技术报告。
+One deliberate departure is worth flagging up front. When the customer changes
+their mind, earlier slots are **decayed rather than erased**. The brief describes
+this as "slot erasure", but in this task every constraint originates from the
+same target product — earlier information still points at the correct answer, so
+erasing it is self-inflicted recall loss. Decay expresses "the new intent takes
+priority" without discarding evidence.
 """
 
 from __future__ import annotations
@@ -15,36 +17,38 @@ from dataclasses import dataclass, field
 from .extract import (
     Verifier,
     detect_override,
-    is_negative,
     extract_constraints,
     is_browsing_opener,
+    is_negative,
     match_category,
 )
 
-# 覆盖发生后，改主意之前说过的约束保留多少权重
+# Weight retained by constraints stated before an intent override.
 PRE_OVERRIDE_DECAY = 0.35
 
-# 连续问了几轮都没榨出新约束，就认为问干净了。
+# How many consecutive rounds of "I have no preference" before we stop asking.
 #
-# 这里原本写死的是 MAX_CONSTRAINTS = 4 —— 来自公开集实测「每场恒为 4 条」。
-# 但官方规格只保证私有集的**场景配比**相同，从没保证约束条数相同。
-# 而这个决定的代价是严重不对称的：
-#   停早了 —— 信息通道永久关闭，没命中就只能空转到第 10 轮；
-#   问久了 —— 顾客回一句「这个属性我没偏好」，零信息、零惩罚，推荐照常返回。
-# 不对称的决定不该由一个写死的计数来做，应该由证据来做。
+# This used to be a hardcoded `MAX_CONSTRAINTS = 4`, taken from the public set
+# where every session holds exactly four constraints. The specification fixes the
+# *scenario mix* for the private split and says nothing about constraint counts,
+# and the cost of that assumption is badly asymmetric:
+#   stopping too early  -> the information channel closes permanently;
+#   asking too long     -> the customer says "no preference", which costs nothing.
+# An asymmetric decision should not rest on a hardcoded count; it should rest on
+# evidence.
 #
-# 阈值实测（公开集，见 PROGRESS.md）：
-#   2 -> 0.887192  太紧。一次「这个属性我没偏好」加一次问错属性就触发，
-#                  但顾客其实还有话说 —— boundary 场景 hit 掉到 0.90。
-#   3 -> 0.891142  与基准持平
-#   4 -> 0.891142  同上
-#  99 -> 0.891142  等于永不停止，同上
-# 3 与「永不停止」同分，说明在 10 轮预算内这道闸门本就极少生效。
-# 取 3：既不因过紧伤到分数，又保留一条真实的停止规则
-#（连问三个不同属性都一无所获 = 顾客确实没话说了），而不是靠「永不停止」蒙混。
+# Threshold measured on the public set:
+#   2  -> 0.887192   too tight: one "no preference" plus one badly chosen
+#                    attribute triggers it while the customer still has more to say
+#   3  -> 0.891142
+#   4  -> 0.891142
+#   99 -> 0.891142   (equivalent to never stopping)
+# 3 ties with "never stop", which shows the gate rarely fires inside a 10-turn
+# budget at all. We take 3 rather than 99 to keep a real stopping rule instead of
+# quietly never stopping.
 BARREN_LIMIT = 3
 
-# 判定「追问没在收敛」时，比较前几名；连续几轮不变算停滞
+# Stall detection: compare the top N recommendations, over this many turns.
 STALL_WINDOW = 5
 STALL_ROUNDS = 2
 
@@ -67,24 +71,24 @@ class SessionState:
     override_turn: int | None = None
     intent: str = "browsing"    # browsing | buying
     last_top: tuple | None = None
-    barren_rounds: int = 0      # 连续几轮追问没榨出新约束
-    stale_rounds: int = 0       # 候选池连续多少轮没缩小
-    last_recommendations: list = field(default_factory=list)  # 降级时交出上一轮结果
+    barren_rounds: int = 0      # consecutive asks that yielded no new constraint
+    stale_rounds: int = 0       # consecutive turns the ranking did not move
+    last_recommendations: list = field(default_factory=list)   # for the failure fallback
 
-    # ── 观察 ────────────────────────────────────────────────────────
+    # ── Observation ─────────────────────────────────────────────────
     def observe(
         self,
         message: str,
         turn: int,
         categories_by_length: list[str],
-        verify: "Verifier | None" = None,
+        verify: Verifier | None = None,
     ) -> None:
         if turn == 1:
             self.category, _ = match_category(message, categories_by_length)
 
         if detect_override(message) and self.override_turn is None:
             self.override_turn = turn
-            for slot in self.slots:                     # 旧槽位降权，不删除
+            for slot in self.slots:                     # decay, never erase
                 slot.weight *= PRE_OVERRIDE_DECAY
 
         found = extract_constraints(message, self.category, verify)
@@ -100,13 +104,14 @@ class SessionState:
                 known.add(text.lower())
                 gained += 1
 
-        # 什么时候算「问不出东西了」？
+        # What counts as "the customer has nothing more to say"?
         #
-        # 只认顾客**明说**「我没有这方面的偏好」，不认「我们没解析出东西」。
-        # 这两者看起来一样，其实完全不同：前者是顾客给的信号，后者是我们自己的失败。
-        # 把后者也算进去，等于话术一改写、抽取一失手，就自己提前闭嘴。
-        # 实测：混为一谈时，困难区（6 条约束 + 话术改写）分数从 0.861180 掉到 0.856580，
-        # buying 场景 hit 从 0.975 掉到 0.963。
+        # Only an explicit refusal counts — never "extraction returned nothing".
+        # Those look identical but are not: the second is our own failure. Counting
+        # it would mean that the moment phrasing changes and parsing slips, the
+        # agent falls silent on its own.
+        # Measured: conflating them cost 0.861180 -> 0.856580 in the hard regime
+        # (six constraints plus paraphrase), with buying Hit Rate 0.975 -> 0.963.
         if turn > 1 and self.asked:
             if gained:
                 self.barren_rounds = 0
@@ -114,31 +119,34 @@ class SessionState:
                 self.barren_rounds += 1
 
         if turn == 1:
-            # 开场就带硬约束 = Buying 轨；开场泛化 = Browsing 轨
+            # A hard constraint in the opener means Buying; a vague opener means Browsing.
             self.intent = "browsing" if (is_browsing_opener(message) or not self.slots) else "buying"
 
-    # ── 查询 ────────────────────────────────────────────────────────
+    # ── Queries ─────────────────────────────────────────────────────
     def constraints(self) -> list[tuple[str, float]]:
         return [(s.text, s.weight) for s in self.slots]
 
     def saturated(self) -> bool:
-        """已经问干净了，再问也榨不出新信息 —— 由证据判定，不由计数判定。
+        """Whether further questions can still extract anything.
 
-        判据是「连续 BARREN_LIMIT 轮追问都没带回新约束」，
-        而不是「已经攒够 N 条约束」。这样无论私有集每场是 3 条、4 条还是 6 条，
-        行为都正确：顾客还有话说就继续问，真的没话说了才停。
+        Judged by evidence — consecutive explicit refusals — not by a constraint
+        count. That way the behaviour is correct whether the private split holds
+        three constraints per session, four, or six: keep asking while the
+        customer still has something to say, stop when they genuinely do not.
 
-        产品层面的理由也保住了——赛题的 MTTC 明确惩罚不必要的对话负担，
-        「问到榨不出东西为止」比「问满固定次数」更接近一个体面的导购该有的分寸。
+        The product argument survives too. MTTC explicitly penalises unnecessary
+        conversational load, and "ask until nothing more comes back" is closer to
+        the restraint a decent shop assistant shows than "ask a fixed number of times".
         """
         return self.barren_rounds >= BARREN_LIMIT
 
     def note_result(self, top_picks: list[str]) -> None:
-        """记录本轮排在最前面的候选，用于识别「追问失效」。
+        """Record this turn's leading candidates, to detect a stalled line of questioning.
 
-        这里刻意**不**跟踪候选池的规模。第一版就是那么写的，是错的：
-        候选池在第 1 轮类目剪枝之后就固定不变了，按规模判定会永远判成停滞。
-        真正在动的是排序结果——所以看的是前几名有没有换人。
+        Deliberately *not* the size of the candidate pool. The first version tracked
+        exactly that and was wrong: the pool is fixed after category pruning on turn
+        one, so a size-based test reports a stall forever. What actually moves is the
+        ranking, so what we watch is whether the leaders changed.
         """
         signature = tuple(top_picks[:STALL_WINDOW])
         if self.last_top is not None and signature == self.last_top:
@@ -148,15 +156,17 @@ class SessionState:
         self.last_top = signature
 
     def strategy_stalled(self) -> bool:
-        """连续两轮问完之后前几名纹丝不动 —— 当前这条追问路线没在收敛。
+        """Two consecutive turns where the leaders did not move: this line of
+        questioning is not converging.
 
-        触发后 Agent 会切换属性选择方式：从「先验加权」改为「纯分歧度优先」，
-        即不再管顾客大概率有没有这类偏好，只挑最能把候选池切开的那个属性问。
-        这是运行时的策略换轨，不是参数微调。
+        On a hit the agent switches attribute-selection criteria at runtime,
+        dropping the "how likely is the customer to care" prior and choosing purely
+        by how much an attribute splits the pool. That is a genuine change of
+        strategy, not a parameter tweak.
 
-        必须已经拿到过信息才允许换轨。一无所有时前几名不动是正常的
-        （顾客还没说任何条件），那不是「策略失效」而是「还没开始」——
-        在那里换轨会让 boundary 场景去问一个先验极低的属性，白烧一轮。
-        实测：不加这个前提时 MTTC 1.565 → 1.575。
+        Information must have arrived first. A frozen ranking at the very start
+        means the conversation has not begun, not that the strategy failed;
+        switching there sends boundary sessions after a low-prior attribute and
+        wastes a turn (measured: MTTC 1.565 -> 1.575).
         """
         return bool(self.slots) and self.stale_rounds >= STALL_ROUNDS

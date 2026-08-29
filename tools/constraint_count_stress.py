@@ -1,34 +1,45 @@
-"""压力测试 · 私有集若每场约束数不是 4，会怎样？
+"""Stress test: what if the private split holds a different number of constraints?
 
-背景：早期实现用 `MAX_CONSTRAINTS = 4` 决定何时停止追问，这个 4 来自公开集实测
-「每场恒为 4 条」。官方规格只保证私有集的**场景配比**相同，从没保证约束条数相同。
+Background: an early implementation used `MAX_CONSTRAINTS = 4` to decide when to
+stop asking. That 4 came from the public set, where every session holds exactly
+four. The specification fixes the *scenario mix* for the private split and says
+nothing about constraint counts.
 
-本脚本把模拟器改造成每场吐 6 条约束，对比两种停止规则：
-  A. 按计数停（旧）—— 攒够 4 条就不问了，第 5、6 条永远问不出来
-  B. 按证据停（新）—— 顾客明说「我没这方面偏好」连续三次才停
+This script widens the simulator to six constraints per session and compares two
+stopping rules:
+  A. count-based (old)    — stop once four constraints are held, so the fifth and
+                            sixth can never be asked for
+  B. evidence-based (new) — stop after three consecutive explicit refusals
 
-原假设：约束数超过 4 时 B 会明显优于 A。**这个假设被实测推翻了。**
+The hypothesis was that B would clearly beat A once sessions carry more than four
+constraints. **That hypothesis was disproved by measurement.**
 
-三个场景实测（新 − 旧）：
+Measured across three regimes (new - old):
 
-    公开集（4 条约束）              0.891142 vs 0.891142    +0.000000
-    6 条约束                        0.898171 vs 0.898171    +0.000000
-    6 条约束 + 话术改写（困难区）   0.861180 vs 0.861180    +0.000000
+    public set (4 constraints)          0.891142 vs 0.891142    +0.000000
+    6 constraints                       0.898171 vs 0.898171    +0.000000
+    6 constraints + paraphrase          0.861180 vs 0.861180    +0.000000
 
-原因：会话结束得太早（公开集 MTTC 1.565，71.5% 的场次第 1 轮就命中），
-停止追问的闸门在命中之前根本没机会生效——新旧规则都是惰性的。
-也就是说，自查报告里把 `MAX_CONSTRAINTS = 4` 标成「中高风险」是**高估了**。
+The reason: sessions end too early. On the public set MTTC is 1.565 and 71.5% of
+sessions convert on turn 1, so the stopping gate rarely gets to act before the hit
+lands — both rules are inert. Which means the earlier risk assessment, which rated
+`MAX_CONSTRAINTS = 4` a significant overfitting hazard, was an overestimate.
 
-那为什么还要改？因为「等价」和「正确」是两回事：
-旧写法把一个未经验证的假设（私有集每场也是 4 条）编进了代码；
-新写法不依赖任何关于约束条数的假设。分数一样，但少了一个会静默失效的前提。
+So why change it at all? Because "equivalent" and "correct" are different things.
+The old form baked an unverified assumption (that the private split also holds four)
+into the code. The new form depends on no assumption about constraint counts. Same
+score, one fewer premise that could fail silently.
 
-途中还暴露了一个真实缺陷：第一版把「我们没解析出东西」也当成「顾客没话说了」，
-于是话术一改写、抽取一失手就自己提前闭嘴——困难区因此掉了 0.0046。
-改成只认顾客**明说**的「我没有偏好」之后，三个场景全部持平。
+One genuine defect did surface along the way. The first replacement counted a round
+as barren whenever *extraction* returned nothing, conflating "the customer has
+nothing more to say" with "we failed to parse what they said". Under paraphrase those
+are precisely the rounds where parsing slips, so the agent fell silent early and the
+hard regime lost 0.0046 (buying Hit Rate 0.975 -> 0.963). Keying on the customer's
+explicit refusal instead restored parity across all three regimes.
 
-所以本脚本的验收改为测它真正成立的性质：**新规则在任何场景下都不劣于旧规则**。
-（原门槛「领先 >= 0.02」是在测量之前定的，测出来才发现问的是个错问题。）
+Acceptance therefore tests the property that actually holds: **the new rule is never
+worse than the old one**. (The original bar, "beats it by 0.02", was set before
+measuring — and measurement showed it was asking the wrong question.)
 """
 
 from __future__ import annotations
@@ -39,12 +50,12 @@ import evaluator.local_evaluator as official
 
 from agent import ASK_ORDER, Agent
 
-WIDE_CONSTRAINTS = 6        # 把每场约束数从 4 撑到 6
-TOLERANCE = 1e-6            # 允许的劣化幅度：本质上要求「不劣于」
+WIDE_CONSTRAINTS = 6        # widen sessions from 4 constraints to 6
+TOLERANCE = 1e-6            # permitted regression: effectively "never worse"
 
 
 def widen_intent_card() -> None:
-    """让模拟器每场吐 6 条约束，而不是 4 条。"""
+    """Make the simulator state six constraints per session instead of four."""
     base = official.intent_card
 
     def wide(product: dict, limit: int = 180) -> dict:
@@ -67,7 +78,7 @@ def widen_intent_card() -> None:
 
 
 class CountGatedAgent(Agent):
-    """旧行为：攒够 4 条约束就停止追问。"""
+    """The old behaviour: stop asking once four constraints are held."""
 
     def _next_attribute(self, state, candidates):
         if len(state.slots) >= 4:
@@ -90,33 +101,36 @@ def main() -> int:
     widen_intent_card()
 
     results = []
-    for label in (f"{WIDE_CONSTRAINTS} 条约束", f"{WIDE_CONSTRAINTS} 条约束 + 话术改写"):
-        if "话术" in label:
+    for label in (f"{WIDE_CONSTRAINTS} constraints",
+                  f"{WIDE_CONSTRAINTS} constraints + paraphrase"):
+        if "paraphrase" in label:
             install_paraphrase()
         old = score(CountGatedAgent(catalog), catalog, dataset)
         new = score(Agent(catalog), catalog, dataset)
         results.append((label, old, new,
                         new["recommended_technical_score"] - old["recommended_technical_score"]))
 
-    print(f"压力测试 · 模拟器每场吐 {WIDE_CONSTRAINTS} 条约束（公开集实际为 4 条）")
-    print(f"  {'场景':<26}{'按计数停(旧)':>16}{'按证据停(新)':>16}{'差值':>12}")
+    print(f"Stress test: simulator states {WIDE_CONSTRAINTS} constraints per session "
+          f"(the public set states 4)")
+    print(f"  {'regime':<34}{'count-based':>14}{'evidence-based':>16}{'delta':>12}")
     for label, old, new, gain in results:
-        print(f"  {label:<24}{old['recommended_technical_score']:>16.6f}"
+        print(f"  {label:<32}{old['recommended_technical_score']:>14.6f}"
               f"{new['recommended_technical_score']:>16.6f}{gain:>+12.6f}")
     print()
     for label, old, new, _ in results:
-        print(f"  {label:<24} hit {old['hit_rate_at_10']:.3f} -> {new['hit_rate_at_10']:.3f}"
+        print(f"  {label:<32} hit {old['hit_rate_at_10']:.3f} -> {new['hit_rate_at_10']:.3f}"
               f"   mrr {old['mrr']:.4f} -> {new['mrr']:.4f}"
               f"   mttc {old['mttc']:.3f} -> {new['mttc']:.3f}")
     print()
 
     worst = min(gain for *_, gain in results)
     passed = worst >= -TOLERANCE
-    print(f"  [{'PASS' if passed else 'FAIL'}] 按证据停 在所有场景下都不劣于 按计数停"
-          f"   最差差值={worst:+.6f}")
-    print("     新规则不更强，但不再依赖「私有集每场也是 4 条约束」这个未验证假设。")
+    print(f"  [{'PASS' if passed else 'FAIL'}] evidence-based is never worse than count-based"
+          f"   worst delta={worst:+.6f}")
+    print("     No stronger, but it no longer assumes the private split also holds")
+    print("     exactly four constraints per session.")
     if not passed:
-        print("\n  这次修改造成了劣化，应当回滚。")
+        print("\n  This change caused a regression and should be reverted.")
     return 0 if passed else 1
 
 

@@ -17,11 +17,16 @@ zero network access, and the Python standard library only**.
 | Tokens consumed | 0 | **0** |
 | Wall clock, 200 sessions | — | **~6 s** (index build 0.85 s) |
 
+> **The main deliverable document is [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)**,
+> in the root of this repository. It maps the system to the brief's four pillars,
+> records every measurement including the failed experiments, and carries a Chinese
+> summary alongside the English text. This README is the shorter orientation.
+
 ---
 
 ## Why it is offline by design
 
-`docs/submission_rules.md` states that **for official final scoring, organizer
+The official submission rules state that **for official final scoring, organizer
 policy may disable network access**, and requires each team to declare whether
 their system needs it. Pillar I of the brief prescribes a pipeline ending in LLM
 semantic ranking; any such pipeline needs a declared offline fallback to survive
@@ -121,19 +126,25 @@ git clone https://github.com/LeyanPeng/Tiktok.git
 cd Tiktok
 ```
 
-Download `catalog.jsonl.gz` from the official participant-kit release, verify it
-against the published `SHA256SUMS`, then:
+**No organiser-supplied material is redistributed in this repository** — not the
+catalog, not the public session set, not the evaluator. Copy them in from the
+official participant kit:
 
 ```bash
+# from an extracted copy of techjam-participant-kit.zip
+cp -r <kit>/evaluator <kit>/starter <kit>/data .
 gzip -dk catalog.jsonl.gz && mv catalog.jsonl data/catalog.jsonl
 ```
 
-> The 58 MB catalog is organiser data and is intentionally **not** committed to
-> this repository. See `DATA_ATTRIBUTION.md`.
->
-> Note that `SHA256SUMS` covers the `.gz` archive, not the extracted
-> `catalog.jsonl`. Checksumming the extracted file will not match, and that is
+That leaves `data/catalog.jsonl`, `data/public_set.jsonl`, `evaluator/`, and
+`starter/` in place, which is everything the commands below need.
+
+> Verify `catalog.jsonl.gz` against the kit's published `SHA256SUMS` before
+> extracting. Note the checksum covers the `.gz` archive, not the extracted
+> `catalog.jsonl` — checksumming the extracted file will not match, and that is
 > expected rather than a sign of corruption.
+>
+> Attribution and terms of use for the underlying data: `DATA_ATTRIBUTION.md`.
 
 ## Reproducing every number in this README
 
@@ -162,6 +173,11 @@ There is no online path to fall back from.
 ## Layout
 
 ```
+TECHNICAL_REPORT.md         >> the main deliverable: full report, mapped to the
+                               four pillars, with every measurement and every
+                               failed experiment
+README.md                   this file
+
 agent.py                    submission entry point, exports Agent
 src/catalog.py              read-only in-memory index, bucketing, priors
 src/extract.py              category matching, constraint recovery, override detection
@@ -169,11 +185,7 @@ src/session_state.py        slot accumulation, override decay, turn budget
 src/ranker.py               additive scoring and ranking
 src/askpolicy.py            information-gain clarification policy
 tools/                      evaluation harness and verification scripts
-docs/TECHNICAL_REPORT.md    full report, mapped to the four pillars
-docs/DEVPOST.md             submission text
-docs/DEMO_SCRIPT.md         demo video script
-docs/*.json                 measured outputs backing every claim above
-PROGRESS.md                 full development log, including failed experiments
+docs/*.json                 raw measured outputs backing every claim above
 ```
 
 `src/` and `agent.py` deliberately **never import from `evaluator/`** — the
@@ -289,12 +301,6 @@ appear verbatim somewhere in the bucket. Mean recall is 98.4%.
 **One constraint string in the public set is in Chinese** (`进口`, "imported"),
 which our span recovery misses. A tokenisation path that is not
 whitespace-delimited would fix it.
-
-## Development log
-
-`PROGRESS.md` carries the full task-by-task record: every acceptance threshold,
-every rollback, and the three occasions on which we specified an acceptance
-threshold before measuring the metric it gated, and had to correct it.
 
 ## Data
 

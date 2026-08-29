@@ -1,15 +1,18 @@
-"""T1 · 数据体检
+"""Data health check: quantify the structure of this task.
 
-把「这道题的结构长什么样」量化成可复跑的数字。一份代码两个用途：
-  1. 开工前的前提核验——数字对不上就说明我们对评测器的理解有误，必须停下重读；
-  2. 最终技术报告里三张数据表的唯一数据来源。
+One script, two jobs:
+  1. A precondition check before any development. If these numbers do not come out
+     as expected, our understanding of the evaluator is wrong and work should stop
+     rather than continue on a false premise.
+  2. The single source for the structural figures quoted in the technical report.
 
-用法:
-    python -m tools.data_health                    # 跑体检，写 docs/data_health.json
-    python -m tools.data_health --check            # 只做验收判定，过则退出码 0
+Usage:
+    python -m tools.data_health                    # full report -> docs/data_health.json
+    python -m tools.data_health --check            # acceptance verdict only
 
-验收线 (T1):
-    类目桶数 == 1115  且  目标商品落桶率 == 200/200
+Acceptance:
+    1115 category buckets, and the target product falls inside its own bucket in
+    all 200 sessions.
 """
 
 from __future__ import annotations
@@ -21,8 +24,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-# 直接复用官方评测器的规则，避免我们自己复刻一份走样的实现。
-# 一旦官方改了规则，这里会立刻跟着变，而不是悄悄地和评测器产生分歧。
+# The simulator's own rules are reused here rather than reimplemented, so this
+# audit cannot drift away from the thing it is auditing.
 from evaluator.local_evaluator import (
     classify_constraint,
     coarse_category,
@@ -70,7 +73,7 @@ def run(catalog_path: Path, dataset_path: Path) -> dict:
     products = build_catalog(catalog_path)
     sessions = load_jsonl(dataset_path)
 
-    # ── 目录：字段覆盖率 ────────────────────────────────────────────
+    # ── Catalog field coverage ──────────────────────────────────────
     fields = ["title", "features", "details", "description", "categories",
               "store", "price", "average_rating", "rating_number"]
     coverage = {
@@ -81,7 +84,8 @@ def run(catalog_path: Path, dataset_path: Path) -> dict:
         for field in fields
     }
 
-    # ── 类目桶：这是我们唯一敢用硬过滤的地方，落桶率必须 100% ──────────
+    # ── Category buckets: the only place a hard filter is allowed, which is
+    #    licensed entirely by a 100% containment rate ─────────────────
     buckets: dict[str, list[str]] = defaultdict(list)
     for asin, product in products.items():
         buckets[bucket_of(product)].append(asin)
@@ -95,7 +99,7 @@ def run(catalog_path: Path, dataset_path: Path) -> dict:
         if target in buckets[name]:
             in_bucket += 1
 
-    # ── 约束：决定 ask_attribute 的排序，信息量最大的先问 ──────────────
+    # ── Constraints: this distribution drives the clarification ordering ──
     constraint_types: Counter[str] = Counter()
     constraints_per_session: Counter[int] = Counter()
     constraint_lengths: list[int] = []
@@ -139,25 +143,26 @@ def run(catalog_path: Path, dataset_path: Path) -> dict:
 
 
 def acceptance(report: dict) -> tuple[bool, list[str]]:
-    """T1 验收：二元判定，没有'差不多'。"""
+    """Binary acceptance. No "close enough"."""
     checks = [
-        ("类目桶数 == 1115",
+        ("category buckets == 1115",
          report["buckets"]["bucket_count"] == EXPECTED_BUCKETS,
          report["buckets"]["bucket_count"]),
-        ("目标落桶率 == 200/200",
+        ("target falls in its own bucket == 200/200",
          report["buckets"]["target_in_bucket"] == f"{EXPECTED_SESSIONS}/{EXPECTED_SESSIONS}",
          report["buckets"]["target_in_bucket"]),
     ]
-    lines = [f"  [{'PASS' if ok else 'FAIL'}] {name}  实际={actual}" for name, ok, actual in checks]
+    lines = [f"  [{'PASS' if ok else 'FAIL'}] {name}   actual={actual}"
+             for name, ok, actual in checks]
     return all(ok for _, ok, _ in checks), lines
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="T1 数据体检")
+    parser = argparse.ArgumentParser(description="Data health check")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--output", default="docs/data_health.json")
-    parser.add_argument("--check", action="store_true", help="只打印验收判定")
+    parser.add_argument("--check", action="store_true", help="print the verdict only")
     args = parser.parse_args()
 
     report = run(Path(args.catalog), Path(args.dataset))
@@ -166,27 +171,27 @@ def main() -> int:
     )
 
     passed, lines = acceptance(report)
-    print("T1 验收")
+    print("Data health")
     print("\n".join(lines))
 
     if not args.check:
         b, c = report["buckets"], report["constraints"]
-        print(f"\n目录          {report['catalog']['product_count']} 件商品")
-        print(f"类目桶        {b['bucket_count']} 个 | 桶大小 中位数 {b['size_percentiles']['median']}"
-              f" (P25 {b['size_percentiles']['p25']} / P75 {b['size_percentiles']['p75']}"
-              f" / P90 {b['size_percentiles']['p90']})")
-        print(f"剪枝效果      50000 -> {b['size_percentiles']['median']} (中位数, 约 "
-              f"{report['catalog']['product_count'] // max(1, b['size_percentiles']['median'])}x)")
-        print(f"小桶占比      <=50 件: {b['sessions_with_bucket_le_50']}/{EXPECTED_SESSIONS}"
-              f" | <=200 件: {b['sessions_with_bucket_le_200']}/{EXPECTED_SESSIONS}")
-        print(f"\n约束总数      {c['total']} 条 | 每场 {list(c['per_session'])} 条")
-        print("约束类型分布  (决定 ask_attribute 的追问顺序)")
+        print(f"\ncatalog          {report['catalog']['product_count']} products")
+        print(f"buckets          {b['bucket_count']} | size median {b['size_percentiles']['median']}"
+              f" (p25 {b['size_percentiles']['p25']} / p75 {b['size_percentiles']['p75']}"
+              f" / p90 {b['size_percentiles']['p90']})")
+        print(f"pruning          50000 -> {b['size_percentiles']['median']} at the median, about "
+              f"{report['catalog']['product_count'] // max(1, b['size_percentiles']['median'])}x")
+        print(f"small buckets    <=50 items: {b['sessions_with_bucket_le_50']}/{EXPECTED_SESSIONS}"
+              f" | <=200 items: {b['sessions_with_bucket_le_200']}/{EXPECTED_SESSIONS}")
+        print(f"\nconstraints      {c['total']} total | {list(c['per_session'])} per session")
+        print("by type          (this ordering drives the clarification policy)")
         for name, info in c["by_type"].items():
             bar = "#" * round(info["share"] * 40)
             print(f"  {name:<10} {info['count']:>4}  {info['share']:>6.1%}  {bar}")
-        print(f"\n场景分布      {report['scenarios']}")
-        print(f"难度分布      {report['difficulty']}")
-        print(f"\n完整报告 -> {args.output}")
+        print(f"\nscenarios        {report['scenarios']}")
+        print(f"difficulty       {report['difficulty']}")
+        print(f"\nfull report -> {args.output}")
 
     return 0 if passed else 1
 

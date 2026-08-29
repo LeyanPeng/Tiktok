@@ -1,7 +1,42 @@
 # Technical Report — Offline Shopping Copilot
 
+> **This is the main deliverable document for this submission.**
+> 本文件为本次提交的主交付文档。
+
 **TechJam 2026 · Track 4 · Shopping Copilot: AI Conversational Search and Recommendations**
 Solo entry · https://github.com/LeyanPeng/Tiktok
+
+Every figure in this report is produced by a command in the repository that exits
+non-zero on failure. See §7 for the list.
+
+---
+
+## 中文摘要
+
+**成绩**：官方弱 BM25 基线 TechnicalScore **0.10671**，本系统 **0.891142**，为基线的 **8.35 倍**；
+Hit Rate@10 打满 **1.000**，MRR **0.674806**，MTTC **1.565**。**零 LLM 调用、零网络访问、零第三方依赖**，
+每场 0.031 秒，成本 $0.00。在自建的话术改写扰动下仍有 **0.813505**。
+
+**核心决策**：官方提交规则写明「最终评分时可能关闭网络访问」，而题面支柱 I 要求的管线以 LLM 语义重排收尾。
+我们在写任何代码之前先验证了前提——第一小时用 130 行标准库代码做的探针就拿到 0.852。
+于是整条打分链路做成**完全离线**，没有需要降级的在线路径。
+
+**三个决定分数的选择**：
+1. **类目桶剪枝是唯一允许的硬过滤** —— 50,000 件收敛到中位 184 件（271×），目标落桶率实测 200/200，这正是它安全的依据。
+2. **约束原句是目录文本的逐字切片，因此当作商品指纹来匹配** —— 比任何离线可用的向量模型都更有力。
+3. **全程不做硬过滤** —— 每个约束只贡献分数，不行使否决权。依据是 ProductAgent 的实测：
+   LLM 生成的 SQL 在 GPT-4 上有 55.36% 退化为无区分度的查询。
+
+**三处有据可依的偏离题面**：不做稠密检索、不做 LLM 语义重排、意图覆盖时**降权**而非抹除旧槽位。
+每一处都附了实测或论文依据，详见 §3。
+
+**一个必须说明的诚实边界**：Hit Rate 1.000 **不代表这个 agent 擅长对话购物，只代表它擅长这个模拟器**。
+详见 §5b —— 这一节是我们主动写的，不是被问出来的。
+
+**一个发现但主动放弃的评测器特性**：向 `ask_attribute` 传 `"other"` 可绕过模拟器的类型过滤，
+两轮即可套出顾客全部需求。它合规且能提分，我们没有用。详见 §6。
+
+以下为完整英文报告。
 
 ---
 
@@ -28,7 +63,7 @@ exits non-zero on failure. See §7.
 
 ## 1. The decision that shaped everything
 
-`docs/submission_rules.md` states that **for official final scoring, organizer
+The official submission rules state that **for official final scoring, organizer
 policy may disable network access**, and requires each team to declare whether
 their system needs it.
 
