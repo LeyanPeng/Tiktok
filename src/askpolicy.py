@@ -96,13 +96,19 @@ class AskPolicy:
         candidates: list[str],
         asked: list[str],
         fallback_order: tuple[str, ...],
+        ignore_prior: bool = False,
     ) -> str | None:
-        """选期望信息增益最大的未问属性。"""
+        """选期望信息增益最大的未问属性。
+
+        ignore_prior=True 时丢掉「顾客大概率有没有这类偏好」这一项，
+        只看哪个属性最能把候选池切开。由停滞检测触发，见 SessionState.strategy_stalled。
+        """
         best, best_score = None, 0.0
         for attribute, prior in TYPE_PRIOR.items():
             if attribute in asked:
                 continue
-            score = prior * self.diversity(candidates, attribute)
+            weight = 1.0 if ignore_prior else prior
+            score = weight * self.diversity(candidates, attribute)
             if score > best_score:
                 best, best_score = attribute, score
 

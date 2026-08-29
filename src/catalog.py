@@ -28,12 +28,6 @@ EXCLUDED_CATEGORIES = {
 # 参与检索的字段。顺序即 Catalog.fields 里的存放顺序。
 TEXT_FIELDS = ("title", "categories", "features", "details", "store", "description")
 
-# 命中发生在哪个字段，含义完全不同：
-# "leather" 出现在标题里，说明这件商品**就是**皮的；埋在 500 字描述末尾，可能只是提了一嘴。
-# 官方 starter 的 BM25 也给了字段权重（title 6.0 / categories 4.0 / features 2.5 / description 1.0），
-# 这里沿用同样的相对次序，压缩到更温和的区间——它只用来拆并列，不该盖过约束本身。
-FIELD_WEIGHT = (3.0, 2.0, 1.6, 1.6, 1.2, 1.0)
-
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
@@ -169,18 +163,6 @@ class Catalog:
             )[:64]
             self._popular[key] = cached
         return cached[:k]
-
-    def field_weight(self, asin: str, needle: str) -> float:
-        """这条约束命中在该商品的哪个字段上，返回该字段的权重（取最高的那个）。
-
-        命中标题说明商品「就是」这个东西；命中长描述可能只是顺嘴提过。
-        没命中任何字段返回 0。
-        """
-        best = 0.0
-        for text, weight in zip(self.fields[asin], FIELD_WEIGHT):
-            if weight > best and needle in text:
-                best = weight
-        return best
 
     def contains_verbatim(self, needle: str, category: str | None = None) -> bool:
         """这一串文本，在候选池的商品原文里能否原样找到。"""

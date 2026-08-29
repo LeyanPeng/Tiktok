@@ -27,6 +27,10 @@ PRE_OVERRIDE_DECAY = 0.35
 # 据此判断「还值不值得再问一轮」
 MAX_CONSTRAINTS = 4
 
+# 判定「追问没在收敛」时，比较前几名；连续几轮不变算停滞
+STALL_WINDOW = 5
+STALL_ROUNDS = 2
+
 
 @dataclass
 class Slot:
@@ -45,7 +49,7 @@ class SessionState:
     asked: list[str] = field(default_factory=list)
     override_turn: int | None = None
     intent: str = "browsing"    # browsing | buying
-    last_pool_size: int | None = None
+    last_top: tuple | None = None
     stale_rounds: int = 0       # 候选池连续多少轮没缩小
     last_recommendations: list = field(default_factory=list)  # 降级时交出上一轮结果
 
@@ -88,14 +92,30 @@ class SessionState:
         """已经问干净了，再问也榨不出新信息。"""
         return len(self.slots) >= MAX_CONSTRAINTS
 
-    def note_pool(self, size: int) -> None:
-        """记录候选池规模，用于识别「追问失效」。"""
-        if self.last_pool_size is not None and size >= self.last_pool_size:
+    def note_result(self, top_picks: list[str]) -> None:
+        """记录本轮排在最前面的候选，用于识别「追问失效」。
+
+        这里刻意**不**跟踪候选池的规模。第一版就是那么写的，是错的：
+        候选池在第 1 轮类目剪枝之后就固定不变了，按规模判定会永远判成停滞。
+        真正在动的是排序结果——所以看的是前几名有没有换人。
+        """
+        signature = tuple(top_picks[:STALL_WINDOW])
+        if self.last_top is not None and signature == self.last_top:
             self.stale_rounds += 1
         else:
             self.stale_rounds = 0
-        self.last_pool_size = size
+        self.last_top = signature
 
     def strategy_stalled(self) -> bool:
-        """连续两轮候选池没缩小 —— 当前追问策略失效，该换路了。"""
-        return self.stale_rounds >= 2
+        """连续两轮问完之后前几名纹丝不动 —— 当前这条追问路线没在收敛。
+
+        触发后 Agent 会切换属性选择方式：从「先验加权」改为「纯分歧度优先」，
+        即不再管顾客大概率有没有这类偏好，只挑最能把候选池切开的那个属性问。
+        这是运行时的策略换轨，不是参数微调。
+
+        必须已经拿到过信息才允许换轨。一无所有时前几名不动是正常的
+        （顾客还没说任何条件），那不是「策略失效」而是「还没开始」——
+        在那里换轨会让 boundary 场景去问一个先验极低的属性，白烧一轮。
+        实测：不加这个前提时 MTTC 1.565 → 1.575。
+        """
+        return bool(self.slots) and self.stale_rounds >= STALL_ROUNDS

@@ -1641,9 +1641,9 @@
   "run_meta": {
     "label": "paraphrase",
     "paraphrase": true,
-    "index_build_seconds": 0.53,
-    "eval_seconds": 10.16,
-    "seconds_per_session": 0.0508,
+    "index_build_seconds": 0.48,
+    "eval_seconds": 11.69,
+    "seconds_per_session": 0.0585,
     "network_required": false
   }
 }

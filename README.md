@@ -146,6 +146,7 @@ Each of the following is a self-contained check that exits non-zero on failure.
 | `python -m tools.rule_parity` | Our category rule == organiser's | 0 mismatches / 50,000 |
 | `python -m tools.bench_selftest` | The benches are not fake green lights | dummy agent scores `0.0` |
 | `python -m tools.failure_drill` | Fault handling has no side effects | 0 escapes, 0 empty returns |
+| `python -m tools.demo_session` | One full multi-turn session, turn by turn | annotated trace |
 
 **Network access is not required at any point**, for development or for scoring.
 There is no online path to fall back from.
@@ -160,7 +161,10 @@ src/session_state.py        slot accumulation, override decay, turn budget
 src/ranker.py               additive scoring and ranking
 src/askpolicy.py            information-gain clarification policy
 tools/                      evaluation harness and verification scripts
-docs/                       measured outputs backing every claim above
+docs/TECHNICAL_REPORT.md    full report, mapped to the four pillars
+docs/DEVPOST.md             submission text
+docs/DEMO_SCRIPT.md         demo video script
+docs/*.json                 measured outputs backing every claim above
 PROGRESS.md                 full development log, including failed experiments
 ```
 

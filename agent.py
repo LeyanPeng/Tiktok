@@ -87,8 +87,8 @@ class Agent:
         )
 
         candidates = self.catalog.candidates(state.category)
-        state.note_pool(len(candidates))
         ranked = self.ranker.rank(candidates, state.constraints(), top_k)
+        state.note_result([asin for asin, _ in ranked])
 
         ask = self._next_attribute(state, candidates)
         if ask:
@@ -110,7 +110,13 @@ class Agent:
             return None
         # 每轮对**当前还活着的**候选池重算各属性分歧度，选期望信息增益最大的那个。
         # 走死顺序等于假设所有场次的候选池长得一样，那显然不成立。
-        return self.ask_policy.choose(candidates, state.asked, ASK_ORDER)
+        #
+        # 连续两轮前几名纹丝不动 = 这条追问路线没在收敛，切换选择方式：
+        # 放弃先验加权，改为纯分歧度优先——不管顾客大概率有没有这类偏好，
+        # 只挑最能把候选池切开的属性。这是运行时换轨（支柱 III）。
+        return self.ask_policy.choose(
+            candidates, state.asked, ASK_ORDER, ignore_prior=state.strategy_stalled()
+        )
 
     @staticmethod
     def _phrase(attribute: str | None, state: SessionState) -> str:
