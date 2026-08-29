@@ -1,0 +1,131 @@
+commit 68be0182e18c1272a5ad2711a41407189117e7e7
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 11:21:12 2026 +0800
+
+    更新进度记录：T13/T14 完成，项目交付就绪
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ PROGRESS.md | 45 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 39 insertions(+), 6 deletions(-)
+
+commit 7c95a04245e48475eeca5616b53f17eb6eefd5e0
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 11:20:37 2026 +0800
+
+    技术报告、Devpost 提交文案、Demo 脚本与会话播放器
+    
+    交付物（对着官方 Deliverables 与评分表写）：
+    - docs/TECHNICAL_REPORT.md  四支柱逐条对应 + 三处有据可依的偏离 + 五项失败实验
+                                + evaluator "other" 特性的主动披露 + 成本延迟披露 + 局限
+    - docs/DEVPOST.md           可直接粘贴的提交文案，含官方要求的开发工具/API/库/数据集四项
+    - docs/DEMO_SCRIPT.md       2分40秒逐镜脚本 + 录制清单（官方接受终端走查形式）
+    - tools/demo_session.py     逐轮播放一场完整会话，对应 "One demonstrated multi-turn session"
+    
+    代码整理（Technical Execution 35% 含「结构良好的代码」）：
+    - 删除 field_weight —— 字段加权实验回滚后的残留死代码
+    - note_pool 改为 note_result：原实现跟踪候选池规模，但池子在类目剪枝后就不变了，
+      按规模判定会永远判成停滞。改为跟踪前五名是否变动。
+    - strategy_stalled 真正接入追问策略，触发运行时换轨（先验加权 → 纯分歧度）
+      加了「必须已拿到信息才允许换轨」的前提，否则 boundary 场景白烧一轮（MTTC 1.565→1.575）
+    
+    全套 8 项验收全绿，分数保持 0.891142，扰动版 0.813505。
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ PROGRESS.md                      |  35 +++-
+ README.md                        |   6 +-
+ agent.py                         |  10 +-
+ docs/DEMO_SCRIPT.md              | 154 ++++++++++++++++
+ docs/DEVPOST.md                  | 167 +++++++++++++++++
+ docs/TECHNICAL_REPORT.md         | 379 +++++++++++++++++++++++++++++++++++++++
+ docs/our_results.json            |   6 +-
+ docs/our_results_paraphrase.json |   6 +-
+ src/askpolicy.py                 |  10 +-
+ src/catalog.py                   |  18 --
+ src/session_state.py             |  34 +++-
+ tools/demo_session.py            | 161 +++++++++++++++++
+ 12 files changed, 949 insertions(+), 37 deletions(-)
+
+commit 1f74c22f91678cf5a37c211f37e8a0b649c28fc5
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 02:32:27 2026 +0800
+
+    异常兜底、README 与完整验收套件
+    
+    - agent.respond 加总兜底层：降级交出上一轮推荐，永不返回空列表
+    - tools/failure_drill.py 故障演练：注入 262 次故障，零逃逸、零空返回、健康态无副作用
+    - 实测发现：评测器自身已吸收单轮异常，agent 侧兜底对分数贡献 -0.001。
+      保留理由是契约保证与真实部署，不是分数——README 里如实说明，不谎称有效。
+    - Catalog.top_popular 缓存热门榜，兜底路径不再对 50,000 件全排序
+    - README 重写：架构、复现命令表、五项失败实验、evaluator "other" 特性的主动披露、局限
+    - requirements.txt 刻意为空（无第三方依赖）
+    
+    断网 + 全新克隆复现验证通过：0.891142，与开发环境一致。
+    全套 7 项验收全绿。
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ PROGRESS.md                      |  44 +++++-
+ README.md                        | 295 +++++++++++++++++++++++++++++----------
+ agent.py                         |  37 ++++-
+ docs/our_results.json            |   8 +-
+ docs/our_results_paraphrase.json |   8 +-
+ requirements.txt                 |   3 +
+ src/catalog.py                   |  17 +++
+ src/session_state.py             |   1 +
+ tools/failure_drill.py           | 129 +++++++++++++++++
+ 9 files changed, 455 insertions(+), 87 deletions(-)
+
+commit ab30fc8b7a41786d3abf3f1b0737831c3b4aaa16
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 02:12:25 2026 +0800
+
+    离线对话购物 Agent：TechnicalScore 0.891（官方基线 0.107）
+    
+    架构（全程零网络、零 token、仅标准库）：
+    - 类目桶硬剪枝，落桶率实测 200/200，把 50,000 件收敛到中位 184 件
+    - 约束原句子串匹配 + IDF 加权词覆盖兜底，纯加性打分，不做硬过滤
+    - 切分歧义用只读目录当裁判：合起来能在目录里原文找到就合并，找不到就切开
+    - 话术改写鲁棒：不依赖字面引导语，直接从目录回捞原文片段
+    - 双轨路由：Browsing 首轮按人气先验排，Buying 首轮直接冲 rank-1
+    - 追问按候选池实时分歧度 x 约束类型先验选属性
+    
+    实测：离线 0.891142 / 话术扰动 0.813505 / 哑 Agent 0.0（测试台反向验证通过）
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ .gitignore                        |    15 +
+ BLOCKED.md                        |    21 +
+ DATA_ATTRIBUTION.md               |    13 +
+ PROGRESS.md                       |   110 +
+ README.md                         |   111 +
+ agent.py                          |   100 +
+ data/README.md                    |    13 +
+ data/public_set.jsonl             |   200 +
+ docs/agent_api_contract.json      |    69 +
+ docs/baseline_results.json        |    10 +
+ docs/competition_specification.md |    98 +
+ docs/data_health.json             |    76 +
+ docs/evaluation_config.json       |    15 +
+ docs/extract_audit.json           | 17960 ++++++++++++++++++++++++++++++++++++
+ docs/our_results.json             |  1649 ++++
+ docs/our_results_paraphrase.json  |  1649 ++++
+ docs/submission_rules.md          |   103 +
+ evaluator/__init__.py             |     2 +
+ evaluator/local_evaluator.py      |   312 +
+ src/__init__.py                   |     0
+ src/askpolicy.py                  |   115 +
+ src/catalog.py                    |   173 +
+ src/extract.py                    |   217 +
+ src/ranker.py                     |    83 +
+ src/session_state.py              |   100 +
+ starter/__init__.py               |     2 +
+ starter/agent.py                  |   102 +
+ tools/__init__.py                 |     0
+ tools/bench_selftest.py           |    62 +
+ tools/data_health.py              |   195 +
+ tools/extract_audit.py            |   220 +
+ tools/rule_parity.py              |    33 +
+ tools/run_eval.py                 |   105 +
+ 33 files changed, 23933 insertions(+)
