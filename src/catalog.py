@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -28,12 +28,102 @@ EXCLUDED_CATEGORIES = {
 # 参与检索的字段。顺序即 Catalog.fields 里的存放顺序。
 TEXT_FIELDS = ("title", "categories", "features", "details", "store", "description")
 
+# 每件商品最多统计前几条片段。模拟器的 intent_card 也只取前几条，
+# 取太多会让长描述压倒统计。
+SPANS_PER_PRODUCT = 6
+
+# 属性词表。与官方 classify_constraint 用同一批词，保证我们判断的「属性」
+# 和模拟器判断的是同一个东西。
+ATTRIBUTE_VOCAB: dict[str, tuple[str, ...]] = {
+    "material": ("cotton", "polyester", "nylon", "leather", "wool",
+                 "spandex", "silk", "rayon", "fabric"),
+    "color": ("color", "colour", "black", "white", "blue", "red", "pink", "green",
+              "brown", "gray", "grey", "purple", "yellow", "orange"),
+    "size": ("size", "sizing", "width", "wide", "narrow"),
+    "style": ("department", "style", "fit", "sleeve", "neck"),
+    "use_case": ("hiking", "running", "gym", "winter", "outdoor", "work"),
+}
+ATTRIBUTE_RE = {
+    name: re.compile(r"\b(" + "|".join(words) + r")\b")
+    for name, words in ATTRIBUTE_VOCAB.items()
+}
+PRICE_RE = re.compile(r"(?:\$|<=|under)\s*\d")
+
+
+# 顾客一场会提到的约束条数。模拟器按同样的条数从商品文案里取。
+CONSTRAINTS_PER_SESSION = 4
+
+MATERIAL_FIRST_RE = re.compile(r"\b(" + "|".join(ATTRIBUTE_VOCAB["material"]) + r")\b")
+COLOR_FIRST_RE = re.compile(
+    r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange)\b"
+)
+
+
+def constraint_candidates(product: dict, corpus: str) -> list[str]:
+    """这件商品会被拿去当约束的那几条文案。
+
+    模拟器不是均匀地从商品文案里抽片段——它先把材质提到最前、颜色提到第二，
+    再接 features / details，最后取前几条。所以「顾客会提哪类约束」的分布，
+    和「商品文案里各类片段的原始占比」并不一样：材质被系统性地抬高了。
+
+    在**整个目录**上复现这个选择过程，得到的是约束类型的总体分布，
+    而不是某 200 场会话的样本 —— 私有集抽的是不同商品，但用的是同一份目录、
+    同一套选择逻辑，所以总体分布对两边都成立。
+
+    这段逻辑与 evaluator 的 intent_card 对齐，一致性由 tools/prior_audit.py 验证。
+    """
+    spans: list[str] = []
+    for field in ("features", "details"):
+        spans.extend(spans_of(product.get(field)))
+
+    material = MATERIAL_FIRST_RE.search(corpus)
+    color = COLOR_FIRST_RE.search(corpus)
+    if material:
+        spans.insert(0, material.group(1))
+    if color:
+        spans.insert(1, f"color: {color.group(1)}")
+    if product.get("price") not in (None, ""):
+        spans.append(f"budget around ${product['price']}")
+
+    cleaned = list(dict.fromkeys(
+        re.sub(r"\s+", " ", s).strip(" -;,.")[:180] for s in spans
+    ))
+    return [s for s in cleaned if len(s) > 2][:CONSTRAINTS_PER_SESSION]
+
+
+def classify_span(value: str) -> str:
+    """把一段商品文案归到某个属性类型。`feature` 是兜底类。"""
+    low = value.lower()
+    if "budget" in low or PRICE_RE.search(low):
+        return "budget"
+    for name in ("material", "color", "size", "style", "use_case"):
+        if ATTRIBUTE_RE[name].search(low):
+            return name
+    return "feature"
+
+
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
     "need", "have", "has", "was", "were", "will", "can", "am",
 }
+
+
+def spans_of(value: object) -> list[str]:
+    """取出字段里的**片段列表**，保留边界。
+
+    `flatten()` 会把字段拼成一整串，片段边界就丢了。但模拟器的顾客话术恰恰是
+    按片段切出来的，所以统计「顾客会提哪类约束」必须在片段粒度上做——
+    这也是为什么这个统计要在目录加载时完成，那时原始结构还在。
+    """
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [f"{key}: {item}" for key, item in value.items() if item not in (None, "", [])]
+    if isinstance(value, list):
+        return [str(item) for item in value if item not in (None, "")]
+    return [str(value)]
 
 
 def flatten(value: object) -> str:
@@ -83,6 +173,9 @@ class Catalog:
         self.idf: dict[str, float] = {}
         self.prior: dict[str, float] = {}   # 人气先验，只用于同分打破平局
         self.fields: dict[str, tuple[str, ...]] = {}  # 按 TEXT_FIELDS 顺序分字段存放
+        # 商品文案里各类属性片段的条数。供 AskPolicy 现算追问先验，
+        # 取代早先写死的一组来自公开集的数字。见 src/askpolicy.derive_type_prior。
+        self.span_types: Counter[str] = Counter()
         self._bucket_blob: dict[str, str] = {}  # 桶级文本缓存，见 bucket_blob()
         self._popular: dict[str, list[str]] = {}  # 类目热门榜缓存，见 top_popular()
         self._load()
@@ -113,6 +206,11 @@ class Catalog:
                     self.prior[asin] = math.log1p(float(count)) * (float(stars) / 5.0)
                 except (TypeError, ValueError):
                     self.prior[asin] = 0.0
+
+                # 约束类型统计。只在这里做得了——出了这个循环，
+                # 原始 JSON 结构就被压成一整串，片段边界不复存在。
+                for span in constraint_candidates(product, text):
+                    self.span_types[classify_span(span)] += 1
 
                 token_set = set(tokenize(text))
                 self.tokens[asin] = token_set

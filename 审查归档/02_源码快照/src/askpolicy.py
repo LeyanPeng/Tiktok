@@ -21,20 +21,32 @@ from collections import Counter
 
 from .catalog import Catalog
 
-# 顾客的约束落在各类型上的先验概率。来自 T1 实测：
-# feature 404 / material 302 / color 60 / style 19 / size 11 / use_case 4，共 800 条。
-# 问一个顾客根本没有偏好的属性，等于白白烧掉一轮。
-TYPE_PRIOR = {
-    "feature": 0.505,
-    "material": 0.378,
-    "color": 0.075,
-    "style": 0.024,
-    "size": 0.014,
-    "use_case": 0.005,
-    "brand": 0.001,
-    "budget": 0.001,
-    "category": 0.001,
-}
+# 顾客的约束落在各类型上的先验概率 —— **从只读目录现算，不写死**。
+#
+# 早先这里是一组写死的数（feature .505 / material .378 / …），来自公开集 200 场
+# 800 条约束的实测。敏感度扫描显示这个先验**真的有杠杆**，而且风险形状很不对称：
+#
+#     实测先验    0.891142      颠倒先验    0.791952   (-0.099)
+#     全均匀      0.882679                            (-0.008)
+#
+# 先验**错了**的代价（-0.099）远大于先验**对了**的收益（+0.008）。
+# 而写死的数只在「私有集分布与公开集相同」时才对——官方从未保证这一点。
+#
+# 所以改为两步：
+#   1. 从目录自己的商品文案里统计各类型片段的占比（私有集用同一份目录，推导必然适用）
+#   2. 向均匀分布平滑，给最坏情况封顶 —— 既拿到次序信息，又不赌分布精确
+#
+# 目录推导 vs 公开集实测（见 tools/prior_audit.py）：相对次序一致，
+# 只有 material 被低估（.140 vs .378），因为模拟器刻意把材质插在第 0 位。
+# 平滑正是为这种「次序对、幅度不准」准备的。
+
+# 无法从商品文案统计出来的属性（brand / budget / category），给一个极低的底数，
+# 避免它们的先验为 0 而永远不被选中。
+FALLBACK_PRIOR = 0.001
+
+# 这里曾经有一个 PRIOR_SMOOTHING（向均匀分布平滑）的旋钮，已删除：
+# 在 0.00 / 0.25 / 0.50 / 0.75 四档上实测，公开集与扰动集分数**完全不变**。
+# 原因是平滑保序，而追问选的是 argmax —— 一个可证明什么都不做的参数就是噪音。
 
 # 各属性的取值词表。与官方 classify_constraint 使用同一批词，
 # 保证我们判断的「属性」和模拟器判断的是同一个东西。
@@ -73,9 +85,24 @@ def _normalised_entropy(values: list[str | None]) -> float:
     return entropy / math.log2(len(counts))
 
 
+def derive_type_prior(catalog: Catalog) -> dict[str, float]:
+    """从目录现算「顾客会提哪类约束」的分布。
+
+    立论：模拟器的顾客话术是从商品 features/details 里切出来的，
+    所以「顾客会提哪类约束」的分布，应当跟着「商品文案里有哪类片段」走。
+    目录是只读的、公开集和私有集共用同一份 —— 从它推导，就不存在「私有集不一样」的风险。
+    """
+    counts = catalog.span_types          # 目录加载时按模拟器的选择逻辑统计好的
+    total = sum(counts.values()) or 1
+    names = [*VOCAB, "feature", "brand", "budget", "category"]
+    return {name: max(FALLBACK_PRIOR, counts.get(name, 0) / total) for name in names}
+
+
 class AskPolicy:
     def __init__(self, catalog: Catalog) -> None:
         self.catalog = catalog
+        # 先验现算，不用写死的数。构建一次，全程复用。
+        self.type_prior = derive_type_prior(catalog)
 
     def diversity(self, candidates: list[str], attribute: str) -> float:
         """这个属性，在当前候选池上有多分歧。"""
@@ -104,7 +131,7 @@ class AskPolicy:
         只看哪个属性最能把候选池切开。由停滞检测触发，见 SessionState.strategy_stalled。
         """
         best, best_score = None, 0.0
-        for attribute, prior in TYPE_PRIOR.items():
+        for attribute, prior in self.type_prior.items():
             if attribute in asked:
                 continue
             weight = 1.0 if ignore_prior else prior

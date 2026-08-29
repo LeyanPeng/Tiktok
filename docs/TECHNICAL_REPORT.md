@@ -176,9 +176,20 @@ expected value = P(customer holds a constraint of this type)
                × H(attribute's value distribution across the current pool)
 ```
 
-The left term is measured, not assumed: 800 constraints across 200 public
-sessions distribute as feature 50.5%, material 37.8%, color 7.5%, remainder
-4.3%. The right term is normalised entropy over the surviving candidates — an
+The left term is **derived from the catalog at load time, not hardcoded**. An
+earlier version baked in the distribution measured across 200 public sessions
+(feature 50.5%, material 37.8%, color 7.5%). A sensitivity sweep showed that term
+carries real leverage — a reversed prior costs 0.099, while having no prior at all
+costs only 0.008 — so being *wrong* about it is far more expensive than being
+right. Since a hardcoded distribution is only correct if the private set matches
+the public one, and the specification fixes the scenario mix but says nothing
+about constraint types, we now replay the simulator's own span-selection logic
+across all 50,000 products and take the resulting population distribution.
+`tools/prior_audit.py` checks every run that the derived ordering still matches
+the measured one; it currently reproduces it exactly
+(feature > material > color > style > size > use_case). **The change is free**: the
+derived prior scores 0.891142, identical to the hardcoded one it replaced, while
+removing the dependency on the public session set. The right term is normalised entropy over the surviving candidates — an
 attribute on which every candidate agrees carries zero information, and asking
 about it burns a turn. This is the twenty-questions optimal-split criterion, and
 it is the mechanism ProductAgent's ablation identifies as the largest single

@@ -1,3 +1,68 @@
+commit 2475cbcb3d0781397b1b0490dff409b6998686ef
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 13:03:31 2026 +0800
+
+    归档导读同步：MAX_CONSTRAINTS 待办结案，并标注仍未处理的两个过拟合常数
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ .../agent_api_contract.json"                       | 69 ----------------------
+ .../evaluation_config.json"                        | 15 -----
+ ...256\241\346\237\245\346\214\207\345\215\227.md" | 18 ++++--
+ 3 files changed, 13 insertions(+), 89 deletions(-)
+
+commit c34bc38d80e2d6d4f53e9b95a5bea039ec411620
+Author: LeyanPeng <pengleyan4@gmail.com>
+Date:   Sat Aug 29 13:03:03 2026 +0800
+
+    修掉 MAX_CONSTRAINTS = 4：停止追问改由证据判定，并如实更正我对该风险的高估
+    
+    改法：判据从「攒够 4 条约束」换成「顾客连续三次明说没有偏好」。
+    4 这个数来自公开集实测，但官方规格只保证私有集的场景配比相同，从未保证约束条数相同。
+    新写法不依赖任何关于约束条数的假设。
+    
+    三次尝试：
+      1. 贫瘠阈值=2                      公开集 0.887192 退步（boundary hit 掉到 0.90）
+      2. 阈值=3，按「抽取无所获」计数     困难区 0.856580 退步
+      3. 阈值=3，只认顾客明说「没有偏好」  三场景全部持平，采纳
+    
+    第 2 次暴露了一个真实缺陷：把「我们解析失败」误当成「顾客没话说了」。
+    话术一改写、抽取一失手，agent 就自己提前闭嘴，困难区掉 0.0046（buying hit 0.975→0.963）。
+    这个缺陷光看代码看不出来，只有做新旧对照实验才会露出来。
+    
+    压力测试 tools/constraint_count_stress.py（模拟器撑到每场 6 条约束，叠加话术改写）：
+    新旧规则在所有场景下逐位相同（+0.000000）。原因是 71.5% 的场次第 1 轮就命中，
+    闸门在命中之前根本没机会生效。
+    
+    → 自查报告里把它标成「中高风险」是高估了。已在报告与 PROGRESS 中自我更正。
+       这次修改的价值是去掉一个未验证假设，不是分数。技术报告已如实写明「did not improve
+       any score we could measure」，不谎称有效。
+    
+    → 第四次在测量之前定验收线（压力测试原门槛「领先 0.02」，实测 +0.000000）。
+       已改为测真正成立的性质：「所有场景下不劣于」。
+    
+    分数不变：离线 0.891142 / 扰动 0.813505。九项验收全绿。
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+ PROGRESS.md                                        |  30 +++++
+ docs/TECHNICAL_REPORT.md                           |  27 ++++-
+ docs/our_results.json                              |   6 +-
+ docs/our_results_paraphrase.json                   |   4 +-
+ src/session_state.py                               |  51 ++++++++-
+ tools/constraint_count_stress.py                   | 124 +++++++++++++++++++++
+ .../TECHNICAL_REPORT.md"                           |  27 ++++-
+ .../src/session_state.py"                          |  51 ++++++++-
+ .../tools/constraint_count_stress.py"              | 124 +++++++++++++++++++++
+ .../agent_api_contract.json"                       |  69 ++++++++++++
+ .../evaluation_config.json"                        |  15 +++
+ .../our_results.json"                              |   6 +-
+ .../our_results_paraphrase.json"                   |   6 +-
+ .../PROGRESS.md"                                   |  30 +++++
+ ...17\220\344\272\244\345\216\206\345\217\262.txt" |  74 ++++++++++++
+ ...207\252\346\237\245\346\212\245\345\221\212.md" |  45 +++++++-
+ 16 files changed, 654 insertions(+), 35 deletions(-)
+
 commit e921fcd3b48ea1434ffaf87a287c3444fa1a045a
 Author: LeyanPeng <pengleyan4@gmail.com>
 Date:   Sat Aug 29 12:36:05 2026 +0800

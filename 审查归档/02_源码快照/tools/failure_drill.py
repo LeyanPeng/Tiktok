@@ -38,7 +38,6 @@ import evaluator.local_evaluator as official
 
 from agent import Agent
 
-HEALTHY_BASELINE = 0.891142
 FAIL_EVERY = 3          # 每 3 轮炸一次，覆盖首轮与中途两种时机
 
 
@@ -86,6 +85,19 @@ class ChaosAgent(Agent):
         return result
 
 
+class UnguardedAgent(Agent):
+    """绕过 try/except 包装，直接走核心路径。
+
+    用来验证「这层包装没有副作用」。原先这一条是拿健康态分数去比一个写死的
+    0.891142 —— 那意味着 agent 每改进一次，这个测试就假失败一次，
+    而且它比的是「分数等于某个数」，不是「包装没有副作用」这个真正要验的性质。
+    改成同一次运行内的自对照：包装版 vs 绕过版，必须逐位相同。
+    """
+
+    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+        return self._respond(session_id, user_message, turn, top_k)
+
+
 def score(agent, catalog: str, dataset: str) -> float:
     ids, cats, products = official.catalog_index(catalog)
     samples = official.load_jsonl(dataset)
@@ -96,6 +108,7 @@ def main() -> int:
     catalog, dataset = "data/catalog.jsonl", "data/public_set.jsonl"
 
     healthy = score(Agent(catalog), catalog, dataset)
+    unguarded = score(UnguardedAgent(catalog), catalog, dataset)
     guarded = ChaosAgent(catalog, with_fallback=True)
     with_fb = score(guarded, catalog, dataset)
     naked = ChaosAgent(catalog, with_fallback=False)
@@ -105,11 +118,14 @@ def main() -> int:
     checks = [
         (f"注入 {guarded.injected} 次故障后仍不崩", guarded.escaped == 0, f"逃逸异常={guarded.escaped}"),
         ("降级从不返回空推荐", guarded.empty_returns == 0, f"空返回={guarded.empty_returns}"),
-        ("健康态不受 wrapper 影响", abs(healthy - HEALTHY_BASELINE) < 1e-6, f"健康态={healthy}"),
+        ("wrapper 无副作用（同一次运行内自对照）",
+         abs(healthy - unguarded) < 1e-9,
+         f"包装版={healthy} 绕过版={unguarded}"),
     ]
 
     print("T12 反向验证 · 故障演练")
-    print(f"  健康态（无故障）        {healthy}")
+    print(f"  健康态 · 有 wrapper     {healthy}")
+    print(f"  健康态 · 绕过 wrapper   {unguarded}   [自对照，取代写死的基线]")
     print(f"  每 {FAIL_EVERY} 轮炸一次 · 有兜底   {with_fb}")
     print(f"  每 {FAIL_EVERY} 轮炸一次 · 无兜底   {without_fb}")
     print(f"  → 兜底救回              {rescued:+.6f}   [实测发现，非门槛]")

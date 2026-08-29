@@ -152,6 +152,8 @@ Each of the following is a self-contained check that exits non-zero on failure.
 | `python -m tools.rule_parity` | Our category rule == organiser's | 0 mismatches / 50,000 |
 | `python -m tools.bench_selftest` | The benches are not fake green lights | dummy agent scores `0.0` |
 | `python -m tools.failure_drill` | Fault handling has no side effects | 0 escapes, 0 empty returns |
+| `python -m tools.prior_audit` | Derived clarification prior matches the measured one | ordering identical |
+| `python -m tools.constraint_count_stress` | Stopping rule survives a different constraint count | no regression |
 | `python -m tools.demo_session` | One full multi-turn session, turn by turn | annotated trace |
 
 **Network access is not required at any point**, for development or for scoring.
