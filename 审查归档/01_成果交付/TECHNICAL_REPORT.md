@@ -137,10 +137,29 @@ scenarios.
 
 **Proactive guidance.** The system asks about exactly one attribute per turn, as
 the API contract permits, chosen by expected information gain (Pillar III). It
-stops asking once four constraints are accumulated — measured to be the exact
-number every session holds — because further questions impose conversational
-cost with no possible return. Under the official metric that restraint is
-directly rewarded through MTTC.
+stops asking when the customer has explicitly declined to express a preference on
+three consecutive occasions.
+
+An earlier version stopped after accumulating four constraints, four being the
+number every public session holds. We replaced it because that constant encodes an
+assumption about the private set that the specification never makes — the spec
+fixes the *scenario mix*, not the constraint count — and the cost is asymmetric:
+stopping early closes the information channel permanently, while asking too long
+costs nothing measurable.
+
+Honesty requires adding that the replacement **did not improve any score we could
+measure**. Under a stress harness that widens sessions to six constraints, with and
+without paraphrase, the two rules are identical to six decimal places
+(`tools/constraint_count_stress.py`), because 71.5% of sessions convert on turn 1
+and the gate rarely gets to act at all. The change buys the removal of an
+unverified assumption, not points.
+
+One genuine defect surfaced along the way. The first replacement counted a round
+as barren whenever *extraction* returned nothing — conflating "the customer has
+nothing more to say" with "we failed to parse what they said". Under paraphrase
+those are exactly the rounds where parsing fails, so the agent fell silent early
+and the hard regime lost 0.0046 (buying Hit Rate 0.975 → 0.963). Keying on the
+customer's explicit refusal instead of our own parser's success restored parity.
 
 **Honest note on clarification-question phrasing.** The evaluator's simulated
 customer reads only the structured `ask_attribute` field; the natural-language

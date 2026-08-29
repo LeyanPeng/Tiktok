@@ -1641,9 +1641,9 @@
   "run_meta": {
     "label": "offline",
     "paraphrase": false,
-    "index_build_seconds": 0.5,
-    "eval_seconds": 8.32,
-    "seconds_per_session": 0.0416,
+    "index_build_seconds": 0.51,
+    "eval_seconds": 14.03,
+    "seconds_per_session": 0.0701,
     "network_required": false
   }
 }

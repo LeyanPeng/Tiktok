@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from .extract import (
     Verifier,
     detect_override,
+    is_negative,
     extract_constraints,
     is_browsing_opener,
     match_category,
@@ -23,9 +24,25 @@ from .extract import (
 # 覆盖发生后，改主意之前说过的约束保留多少权重
 PRE_OVERRIDE_DECAY = 0.35
 
-# 顾客一场最多吐露 4 条约束（实测 200/200 场次恒为 4），
-# 据此判断「还值不值得再问一轮」
-MAX_CONSTRAINTS = 4
+# 连续问了几轮都没榨出新约束，就认为问干净了。
+#
+# 这里原本写死的是 MAX_CONSTRAINTS = 4 —— 来自公开集实测「每场恒为 4 条」。
+# 但官方规格只保证私有集的**场景配比**相同，从没保证约束条数相同。
+# 而这个决定的代价是严重不对称的：
+#   停早了 —— 信息通道永久关闭，没命中就只能空转到第 10 轮；
+#   问久了 —— 顾客回一句「这个属性我没偏好」，零信息、零惩罚，推荐照常返回。
+# 不对称的决定不该由一个写死的计数来做，应该由证据来做。
+#
+# 阈值实测（公开集，见 PROGRESS.md）：
+#   2 -> 0.887192  太紧。一次「这个属性我没偏好」加一次问错属性就触发，
+#                  但顾客其实还有话说 —— boundary 场景 hit 掉到 0.90。
+#   3 -> 0.891142  与基准持平
+#   4 -> 0.891142  同上
+#  99 -> 0.891142  等于永不停止，同上
+# 3 与「永不停止」同分，说明在 10 轮预算内这道闸门本就极少生效。
+# 取 3：既不因过紧伤到分数，又保留一条真实的停止规则
+#（连问三个不同属性都一无所获 = 顾客确实没话说了），而不是靠「永不停止」蒙混。
+BARREN_LIMIT = 3
 
 # 判定「追问没在收敛」时，比较前几名；连续几轮不变算停滞
 STALL_WINDOW = 5
@@ -50,6 +67,7 @@ class SessionState:
     override_turn: int | None = None
     intent: str = "browsing"    # browsing | buying
     last_top: tuple | None = None
+    barren_rounds: int = 0      # 连续几轮追问没榨出新约束
     stale_rounds: int = 0       # 候选池连续多少轮没缩小
     last_recommendations: list = field(default_factory=list)  # 降级时交出上一轮结果
 
@@ -71,6 +89,7 @@ class SessionState:
 
         found = extract_constraints(message, self.category, verify)
         known = {s.text.lower() for s in self.slots}
+        gained = 0
         for text in found:
             if text.lower() not in known:
                 self.slots.append(Slot(
@@ -79,6 +98,20 @@ class SessionState:
                     source="override" if self.override_turn == turn else "stated",
                 ))
                 known.add(text.lower())
+                gained += 1
+
+        # 什么时候算「问不出东西了」？
+        #
+        # 只认顾客**明说**「我没有这方面的偏好」，不认「我们没解析出东西」。
+        # 这两者看起来一样，其实完全不同：前者是顾客给的信号，后者是我们自己的失败。
+        # 把后者也算进去，等于话术一改写、抽取一失手，就自己提前闭嘴。
+        # 实测：混为一谈时，困难区（6 条约束 + 话术改写）分数从 0.861180 掉到 0.856580，
+        # buying 场景 hit 从 0.975 掉到 0.963。
+        if turn > 1 and self.asked:
+            if gained:
+                self.barren_rounds = 0
+            elif is_negative(message):
+                self.barren_rounds += 1
 
         if turn == 1:
             # 开场就带硬约束 = Buying 轨；开场泛化 = Browsing 轨
@@ -89,8 +122,16 @@ class SessionState:
         return [(s.text, s.weight) for s in self.slots]
 
     def saturated(self) -> bool:
-        """已经问干净了，再问也榨不出新信息。"""
-        return len(self.slots) >= MAX_CONSTRAINTS
+        """已经问干净了，再问也榨不出新信息 —— 由证据判定，不由计数判定。
+
+        判据是「连续 BARREN_LIMIT 轮追问都没带回新约束」，
+        而不是「已经攒够 N 条约束」。这样无论私有集每场是 3 条、4 条还是 6 条，
+        行为都正确：顾客还有话说就继续问，真的没话说了才停。
+
+        产品层面的理由也保住了——赛题的 MTTC 明确惩罚不必要的对话负担，
+        「问到榨不出东西为止」比「问满固定次数」更接近一个体面的导购该有的分寸。
+        """
+        return self.barren_rounds >= BARREN_LIMIT
 
     def note_result(self, top_picks: list[str]) -> None:
         """记录本轮排在最前面的候选，用于识别「追问失效」。
