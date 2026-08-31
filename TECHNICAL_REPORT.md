@@ -4,7 +4,12 @@
 > 本文件为本次提交的主交付文档。
 
 **TechJam 2026 · Track 4 · Shopping Copilot: AI Conversational Search and Recommendations**
-Solo entry · https://github.com/LeyanPeng/Tiktok
+Solo entry
+
+- **Repository** · https://github.com/LeyanPeng/Tiktok
+- **Demo video** · https://youtu.be/gyuh9YjiGA4 — a 2:39 walkthrough of one full
+  multi-turn session, the failed experiments, and the evaluator property we
+  disclosed rather than exploited
 
 Every figure in this report is produced by a command in the repository that exits
 non-zero on failure. See §7 for the list.

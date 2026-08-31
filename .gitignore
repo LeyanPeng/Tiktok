@@ -17,6 +17,17 @@ docs/DEVPOST.md
 docs/DEMO_SCRIPT.md
 review-archive/
 
+# Video. The demo lives on YouTube (linked from README and TECHNICAL_REPORT);
+# the raw capture is 220 MB, past GitHub's 100 MB file limit, and a rendered copy
+# in a code repository serves no reviewer who can already watch it.
+# Kept locally, not committed.
+*.mp4
+*.mov
+*.mkv
+*.srt
+*.ass
+Demo_vedio/
+
 # Evaluation output
 results*.json
 runs/

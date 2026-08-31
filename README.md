@@ -21,6 +21,8 @@ zero network access, and the Python standard library only**.
 > in the root of this repository. It maps the system to the brief's four pillars,
 > records every measurement including the failed experiments, and carries a Chinese
 > summary alongside the English text. This README is the shorter orientation.
+>
+> **Demo video:** https://youtu.be/gyuh9YjiGA4 (2:39)
 
 ---
 
